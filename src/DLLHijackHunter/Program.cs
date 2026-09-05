@@ -23,6 +23,13 @@ public class Program
             return LoadProbe.RunChild(args[1], args[2],
                 traditional: args.Length > 3 && args[3] == "traditional");
 
+        // Prevent accidental scan freezes from the legacy console's QuickEdit Mode:
+        // a stray click in the window would otherwise put it into mark/select mode and
+        // block stdout, stalling a long scan until a key is pressed. Disabled for the run;
+        // the original console mode is restored on exit. See Native/ConsoleQuickEdit.cs.
+        var quickEditGuard = Native.ConsoleQuickEdit.Disable();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => quickEditGuard.Dispose();
+
         // Global exception handlers
         AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
         {
