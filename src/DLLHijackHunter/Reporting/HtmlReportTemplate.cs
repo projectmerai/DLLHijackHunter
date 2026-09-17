@@ -132,7 +132,7 @@ public static class HtmlReportTemplate
 
         sb.AppendLine($@"
             <div class=""footer"">
-                <p>DLLHijackHunter v2.1.0 • Generated on {result.ScanDate:yyyy-MM-dd HH:mm:ss UTC}</p>
+                <p>DLLHijackHunter v2.5.0 • Generated on {result.ScanDate:yyyy-MM-dd HH:mm:ss UTC}</p>
             </div>
         </body>
 </html>");

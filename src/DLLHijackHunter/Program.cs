@@ -182,7 +182,7 @@ public class Program
 
         // ─── Banner ───
         BannerConstants.PrintBanner();
-        AnsiConsole.MarkupLine($"[dim]v2.1.0 | {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC[/]\n");
+        AnsiConsole.MarkupLine($"[dim]v2.5.0 | {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC[/]\n");
 
         // ─── Elevation check ───
         bool isElevated;
