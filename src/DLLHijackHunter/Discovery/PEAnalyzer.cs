@@ -213,6 +213,36 @@ public class PEAnalyzer
     }
 
     /// <summary>
+    /// Get exports from a DLL file with both name and ordinal, including ordinal-only exports
+    /// (where <see cref="ExportEntry.Name"/> is null). Used by the runtime export-forwarding
+    /// proxy so every export — named or ordinal-only — gets a correct forwarder.
+    /// </summary>
+    public static List<ExportEntry> GetExportEntries(string dllPath)
+    {
+        var list = new List<ExportEntry>();
+        try
+        {
+            var pe = new PeFile(dllPath);
+            if (pe.ExportedFunctions != null)
+            {
+                foreach (var e in pe.ExportedFunctions)
+                {
+                    // A forwarder in the ORIGINAL still exposes a name/ordinal we must re-forward.
+                    list.Add(new ExportEntry
+                    {
+                        Name = string.IsNullOrEmpty(e.Name) ? null : e.Name,
+                        Ordinal = (ushort)e.Ordinal
+                    });
+                }
+            }
+        }
+        catch
+        {
+        }
+        return list;
+    }
+
+    /// <summary>
     /// Checks for an embedded manifest using multiple methods.
     /// </summary>
     private static void CheckForManifest(PeFile pe, string filePath, PEAnalysisResult result)
@@ -296,6 +326,15 @@ public class PEAnalyzer
             try { result.ManifestContent = File.ReadAllText(externalManifest); } catch { }
         }
     }
+}
+
+/// <summary>
+/// A single PE export: its name (null for ordinal-only exports) and its (biased) ordinal.
+/// </summary>
+public class ExportEntry
+{
+    public string? Name { get; set; }
+    public ushort Ordinal { get; set; }
 }
 
 public class PEAnalysisResult

@@ -96,25 +96,46 @@ public class CanaryEngine
             {
             }
 
+            // Resolve the "original" DLL whose exports must be preserved so a host that binds
+            // them at load time (a static import) keeps resolving after we deploy the canary.
+            // Prefer the DLL already sitting at the deploy path; else the known legit copy. If
+            // neither exports anything it is a true phantom — the export-less canary is correct.
+            string? originalForProxy = null;
+            try
+            {
+                if (File.Exists(candidate.HijackWritablePath) &&
+                    PEAnalyzer.GetExportEntries(candidate.HijackWritablePath).Count > 0)
+                    originalForProxy = candidate.HijackWritablePath;
+                else if (!string.IsNullOrEmpty(candidate.DllLegitPath) &&
+                         File.Exists(candidate.DllLegitPath!) &&
+                         PEAnalyzer.GetExportEntries(candidate.DllLegitPath!).Count > 0)
+                    originalForProxy = candidate.DllLegitPath;
+            }
+            catch
+            {
+            }
+
             // Build canary DLL. The confirmation path is derived from the deploy location
             // (HijackWritablePath), which is exactly where the canary will be loaded from.
             var canaryInfo = CanaryDllBuilder.BuildCanary(
                 canaryId,
                 candidate.DllName,
-                candidate.DllLegitPath,
+                originalForProxy,
                 is64Bit,
                 candidate.HijackWritablePath
             );
 
-            bool proxyDesired = candidate.DllLegitPath != null &&
-                                File.Exists(candidate.DllLegitPath);
             if (canaryInfo.IsProxy)
             {
-                candidate.Notes.Add("WARNING (EXPERIMENTAL): Canary generated as a Proxy DLL. Export forwarding uses basic name-only forwarding. This is a best-effort, heuristic implementation that may crash the host process if ordinals or decorated names are required.");
+                candidate.Notes.Add("Canary generated as a runtime-synthesized export-forwarding " +
+                    "proxy (no toolchain required): every export of the original is forwarded to a " +
+                    "sidecar copy, so the host keeps working and DllMain still fires.");
             }
-            else if (proxyDesired)
+            else if (originalForProxy != null)
             {
-                candidate.Notes.Add("Canary is the precompiled non-proxy build: it confirms the DLL load but does not forward the original exports, so the host process may crash after confirmation (no MSVC toolchain was available to build a functional proxy).");
+                candidate.Notes.Add("Canary is the export-less precompiled build: runtime proxy " +
+                    "synthesis was unavailable, so a host that binds this DLL's exports at load " +
+                    "time may fail to load and confirmation may not fire.");
             }
 
             // Check if DLL was obtained successfully
@@ -138,6 +159,7 @@ public class CanaryEngine
 
             // Backup existing DLL if present
             string? backupPath = null;
+            string? sidecarPath = null;   // proxy forward target, staged before deploy
             bool hadExistingDll = File.Exists(candidate.HijackWritablePath);
 
             // Record initial service state
@@ -159,6 +181,31 @@ public class CanaryEngine
                     string queryOut = queryProc?.StandardOutput.ReadToEnd() ?? string.Empty;
                     queryProc?.WaitForExit(2000);
                     serviceWasRunning = queryOut.Contains("RUNNING", StringComparison.OrdinalIgnoreCase);
+                }
+                catch
+                {
+                }
+            }
+
+            // Pre-deploy service stop: a running service keeps the DLL mapped and its file
+            // handle open, which would cause File.Copy to fail with a sharing violation.
+            // Stop it here so we can overwrite the DLL. TriggerExecutor restarts it as
+            // part of the confirmation trigger, and the finally block restores the original
+            // running state once testing is complete.
+            if (candidate.Trigger == TriggerType.Service && serviceWasRunning)
+            {
+                try
+                {
+                    var preStopPsi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "sc.exe",
+                        Arguments = $"stop \"{candidate.TriggerIdentifier}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    using var preStopProc = System.Diagnostics.Process.Start(preStopPsi);
+                    preStopProc?.WaitForExit(5000);
+                    await Task.Delay(1500); // allow the service process to exit and unload the DLL
                 }
                 catch
                 {
@@ -208,6 +255,25 @@ public class CanaryEngine
                     }
                 }
 
+                // Stage the proxy sidecar (the forward target): a copy of the original under a
+                // distinct name beside the deploy location, so the proxy's forwarders resolve to
+                // real code instead of to the canary itself. Must happen BEFORE the deploy copy,
+                // which overwrites the original at HijackWritablePath.
+                if (canaryInfo.IsProxy && originalForProxy != null)
+                {
+                    sidecarPath = CanaryDllBuilder.GetSidecarPath(candidate.HijackWritablePath);
+                    try
+                    {
+                        File.Copy(originalForProxy, sidecarPath, true);
+                    }
+                    catch (Exception ex)
+                    {
+                        candidate.CanaryResult = CanaryResult.Failed;
+                        candidate.Notes.Add($"Could not stage proxy sidecar: {ex.Message}");
+                        return;
+                    }
+                }
+
                 // Deploy canary DLL
                 File.Copy(canaryInfo.DllPath, candidate.HijackWritablePath, true);
 
@@ -215,17 +281,8 @@ public class CanaryEngine
                 bool triggered = await TriggerExecutor.TriggerAsync(
                     candidate, _profile.CanaryTimeoutSeconds);
 
-                // Wait for DllMain to execute and write confirmation
-                await Task.Delay(TimeSpan.FromSeconds(3));
-
-                // Check for confirmation file
-                if (File.Exists(canaryInfo.ConfirmPath))
-                {
-                    candidate.CanaryResult = CanaryResult.Fired;
-                    candidate.Confidence = 100.0;
-                    ParseConfirmation(candidate, canaryInfo.ConfirmPath);
-                }
-                else if (!triggered)
+                // If execution could not be triggered at all, fail immediately.
+                if (!triggered)
                 {
                     candidate.CanaryResult = CanaryResult.Failed;
                     candidate.Notes.Add("Could not trigger execution context " +
@@ -233,20 +290,34 @@ public class CanaryEngine
                 }
                 else
                 {
-                    // Wait a bit longer for slow services
-                    await Task.Delay(TimeSpan.FromSeconds(5));
+                    // Poll for the confirmation file across the settle window so we catch both
+                    // fast loaders (check every 2 s) and slow services (full CanarySettleSeconds).
+                    int settleMs = _profile.CanarySettleSeconds * 1000;
+                    int elapsed = 0;
+                    const int pollInterval = 2000;
 
-                    if (File.Exists(canaryInfo.ConfirmPath))
+                    while (elapsed < settleMs)
                     {
-                        candidate.CanaryResult = CanaryResult.Fired;
-                        candidate.Confidence = 100.0;
-                        ParseConfirmation(candidate, canaryInfo.ConfirmPath);
+                        await Task.Delay(pollInterval);
+                        elapsed += pollInterval;
+
+                        if (File.Exists(canaryInfo.ConfirmPath))
+                        {
+                            candidate.CanaryResult = CanaryResult.Fired;
+                            candidate.Confidence = 100.0;
+                            ParseConfirmation(candidate, canaryInfo.ConfirmPath);
+                            break;
+                        }
                     }
-                    else
+
+                    if (candidate.CanaryResult != CanaryResult.Fired)
                     {
                         candidate.CanaryResult = CanaryResult.Timeout;
-                        candidate.Notes.Add("Execution triggered but canary did not fire within timeout. " +
-                            "May require specific conditions, user interaction, or longer wait.");
+                        candidate.Notes.Add(
+                            $"Execution triggered but canary did not fire within {_profile.CanarySettleSeconds} s settle window. " +
+                            "The target may call SetDefaultDllDirectories(), use a hardened search order, " +
+                            "or need specific conditions to load the DLL. " +
+                            "Try --canary-settle <seconds> for a longer wait.");
                     }
                 }
 
@@ -301,6 +372,19 @@ public class CanaryEngine
                     catch
                     {
                         candidate.Notes.Add("Warning: Could not restore original DLL from backup - file may be locked by a lingering process. Manual cleanup may be required.");
+                    }
+                }
+
+                // Remove the proxy sidecar (forward target) if we staged one.
+                if (sidecarPath != null && File.Exists(sidecarPath))
+                {
+                    try
+                    {
+                        File.Delete(sidecarPath);
+                    }
+                    catch
+                    {
+                        candidate.Notes.Add("Warning: Could not remove proxy sidecar — file may be locked. Manual cleanup may be required.");
                     }
                 }
 

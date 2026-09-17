@@ -42,15 +42,20 @@ public static class TriggerExecutor
     {
         try
         {
-            // Stop the service
+            // Stop the service (may already be stopped by CanaryEngine's pre-deploy stop, but
+            // running it again is harmless — ensures any locked file handle is released).
             await RunProcess("sc.exe", $"stop \"{serviceName}\"", 10);
             await Task.Delay(2000);
 
-            // Start the service
-            var (exitCode, _, _) = await RunProcess("sc.exe", $"start \"{serviceName}\"", timeoutSeconds);
-            await Task.Delay(3000); // wait for DLL loading
+            // Start the service. Do NOT gate on sc start exit code: a service that loads the
+            // canary DLL and then crashes still fires DllMain (writing the confirm file) before
+            // it exits. sc.exe reports that crash as a non-zero exit code, which would make us
+            // return false and mark the canary as Failed — even though it actually fired.
+            // The poll in CanaryEngine (which checks for the confirm file) is the real oracle.
+            await RunProcess("sc.exe", $"start \"{serviceName}\"", timeoutSeconds);
+            await Task.Delay(3000); // allow DLL to load and DllMain to execute
 
-            return exitCode == 0;
+            return true; // trigger sent — CanaryEngine's poll decides the outcome
         }
         catch
         {
@@ -67,8 +72,15 @@ public static class TriggerExecutor
                 $"/run /tn \"{taskPath}\"",
                 timeoutSeconds);
 
-            await Task.Delay(3000);
-            return exitCode == 0;
+            if (exitCode != 0)
+                return false; // schtasks itself failed (task not found, access denied, etc.)
+
+            // Give the task scheduler time to actually launch the process and load the DLL.
+            // schtasks /run queues the task and returns quickly; the process launch is async.
+            // 8 s covers typical scheduling latency on a moderately loaded system; the canary
+            // poll window in CanaryEngine then has the full CanarySettleSeconds remaining.
+            await Task.Delay(8000);
+            return true; // trigger sent — CanaryEngine's poll decides the outcome
         }
         catch
         {

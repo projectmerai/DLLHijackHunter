@@ -91,12 +91,21 @@ public static class SearchOrderCalculator
         {
             if (path.StartsWith("[CWD]")) continue;
 
-            // If DLL exists at this position, stop (we've reached the legitimate copy)
+            // If DLL exists at this position, check whether the directory is also writable
+            // (overwrite attack — attacker replaces the existing legitimate copy in place).
+            // Then stop: no search-order position after the legitimate DLL is hijackable.
             if (actualLocation != null &&
                 path.Equals(actualLocation, StringComparison.OrdinalIgnoreCase))
+            {
+                string? existingDir = Path.GetDirectoryName(path);
+                if (existingDir != null &&
+                    Native.AclChecker.IsDirectoryWritableByStandardUser(existingDir, runAsAccount))
+                    hijackable.Add(path); // directory writable → DLL itself can be overwritten
                 break;
+            }
 
             // Check if an unprivileged attacker can write to this location
+            // (plant a DLL before the legitimate copy is found).
             string? dir = Path.GetDirectoryName(path);
             if (dir != null && Native.AclChecker.IsDirectoryWritableByStandardUser(dir, runAsAccount))
             {

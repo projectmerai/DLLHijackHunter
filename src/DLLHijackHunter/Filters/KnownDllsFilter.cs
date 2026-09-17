@@ -6,7 +6,9 @@ namespace DLLHijackHunter.Filters;
 /// <summary>
 /// HARD GATE: KnownDLLs are loaded from a shared section object cache.
 /// The filesystem search order is NOT used for these DLLs.
-/// EXCEPTION: .local files can bypass KnownDLLs (handled separately).
+/// NOTE: .local redirection bypassed KnownDLLs on Windows XP/2003, but this was
+/// removed in Windows Vista. On modern Windows, KnownDLLs cannot be redirected
+/// by .local files — DotLocal candidates for KnownDLLs are false positives.
 /// </summary>
 public class KnownDllsFilter : IHardGate
 {
@@ -27,12 +29,14 @@ public class KnownDllsFilter : IHardGate
         {
             string dll = c.DllName.ToLowerInvariant();
 
-            // If this is a .local bypass, don't kill it — .local overrides KnownDLLs
+            // .local redirection does NOT bypass KnownDLLs on Windows Vista+.
+            // KnownDLLs are served from the kernel object store (\KnownDlls\) and are
+            // immune to .local files on modern Windows. Suppress these as false positives.
+            // (Windows XP/2003 were the exception; this tool targets Vista+ environments.)
             if (c.Type == HijackType.DotLocal)
             {
-                c.FilterResults["KnownDLLs"] = FilterResult.Passed;
-                c.Notes.Add("KnownDLL bypassed via .local redirection");
-                return true;
+                c.FilterResults["KnownDLLs"] = FilterResult.Failed;
+                return false;
             }
 
             // Check both native and WoW64 KnownDLLs

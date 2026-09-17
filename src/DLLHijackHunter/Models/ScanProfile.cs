@@ -11,6 +11,9 @@ public class ScanProfile
     public bool IncludeSamePrivilege { get; set; } = true;
     public bool IncludePPL { get; set; } = true;
     public int CanaryTimeoutSeconds { get; set; } = 15;
+    // How long to wait after execution is triggered before reading the confirmation file.
+    // Services that load many DLLs at startup may need more than the default 10 s.
+    public int CanarySettleSeconds { get; set; } = 10;
     public int ETWDurationSeconds { get; set; } = 120;
     public bool TriggerServices { get; set; } = true;
     public bool TriggerScheduledTasks { get; set; } = true;
@@ -38,6 +41,7 @@ public class ScanProfile
         IncludeSamePrivilege = true,
         IncludePPL = true,
         CanaryTimeoutSeconds = 30,
+        CanarySettleSeconds = 20,
         TriggerServices = true,
         TriggerScheduledTasks = true,
         TriggerCOM = true,
@@ -81,6 +85,7 @@ public class ScanProfile
         IncludeSamePrivilege = false,
         IncludePPL = false,
         CanaryTimeoutSeconds = 20,
+        CanarySettleSeconds = 15,
         ConfirmedOnly = true,
         TriggerServices = true,
         TriggerScheduledTasks = true,

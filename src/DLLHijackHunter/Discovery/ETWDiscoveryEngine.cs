@@ -185,6 +185,16 @@ public class ETWDiscoveryEngine
 
             if (_processes.TryGetValue(data.ProcessID, out var ctx))
             {
+                // When --target is set, skip processes whose binary is not under the target.
+                if (!string.IsNullOrEmpty(_profile.TargetPath))
+                {
+                    string targetDir = _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
+                    if (!ctx.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !ctx.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
+                        return;
+                }
+
                 ctx.LoadedDlls.Add(fileName);
 
                 string dllName = Path.GetFileName(fileName);
@@ -252,6 +262,16 @@ public class ETWDiscoveryEngine
 
                         if (_processes.TryGetValue(data.ProcessID, out var ctx))
                         {
+                            // When --target is set, skip processes not under the target.
+                            if (!string.IsNullOrEmpty(_profile.TargetPath))
+                            {
+                                string targetDir = _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
+                                if (!ctx.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
+                                        StringComparison.OrdinalIgnoreCase) &&
+                                    !ctx.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
+                                    return;
+                            }
+
                             processPath = ctx.BinaryPath;
                             tokenUser = ctx.TokenUser;
                             ctx.FailedDllLookups.Add(fileName);
@@ -284,8 +304,17 @@ public class ETWDiscoveryEngine
     {
         try
         {
+            string? targetDir = string.IsNullOrEmpty(_profile.TargetPath)
+                ? null
+                : _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
+
             var services = ServiceEnumerator.EnumerateServices()
                 .Where(s => s.IsAutoStart && s.StartType != "DISABLED")
+                // When --target is set, only trigger services whose binary lives under that path.
+                .Where(s => targetDir == null ||
+                            s.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
+                                StringComparison.OrdinalIgnoreCase) ||
+                            s.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
                 .GroupBy(s => s.TriggerIdentifier)
                 .Select(g => g.First())
                 .Take(100)
@@ -322,7 +351,18 @@ public class ETWDiscoveryEngine
     {
         try
         {
-            var tasks = ScheduledTaskEnumerator.EnumerateScheduledTasks();
+            string? targetDir = string.IsNullOrEmpty(_profile.TargetPath)
+                ? null
+                : _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
+
+            var allTasks = ScheduledTaskEnumerator.EnumerateScheduledTasks();
+            // When --target is set, only trigger tasks whose binary lives under that path.
+            var tasks = targetDir == null
+                ? allTasks
+                : allTasks.Where(t =>
+                    t.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    t.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase)).ToList();
             foreach (var task in tasks.Take(30))
             {
                 try

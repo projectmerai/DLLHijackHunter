@@ -112,6 +112,11 @@ public class Program
             description: "Verify search order with the real loader: briefly place a benign probe at " +
                 "each writable position and confirm it wins the DLL search (standard user; modifies files transiently)");
 
+        var canarySettleOption = new Option<int>(
+            aliases: new[] { "--canary-settle" },
+            description: "Seconds to wait for a canary DLL to fire after execution is triggered (default: profile-defined, aggressive=20)",
+            getDefaultValue: () => 0);
+
         rootCommand.AddOption(profileOption);
         rootCommand.AddOption(outputOption);
         rootCommand.AddOption(formatOption);
@@ -124,6 +129,7 @@ public class Program
         rootCommand.AddOption(lpeOnlyOption);
         rootCommand.AddOption(logFileOption);
         rootCommand.AddOption(verifyLoadOption);
+        rootCommand.AddOption(canarySettleOption);
 
         rootCommand.SetHandler(async (ctx) =>
         {
@@ -144,6 +150,7 @@ public class Program
             var lpeOnly = ctx.ParseResult.GetValueForOption(lpeOnlyOption);
             var logFile = ctx.ParseResult.GetValueForOption(logFileOption);
             var verifyLoad = ctx.ParseResult.GetValueForOption(verifyLoadOption);
+            var canarySettle = ctx.ParseResult.GetValueForOption(canarySettleOption);
 
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) =>
@@ -154,7 +161,7 @@ public class Program
             };
 
             await RunScan(profile, output, format, minConf, noCanary, noEtw,
-                confirmedOnly, verbose, target, lpeOnly, logFile, verifyLoad, cts.Token);
+                confirmedOnly, verbose, target, lpeOnly, logFile, verifyLoad, canarySettle, cts.Token);
         });
 
         return await rootCommand.InvokeAsync(args);
@@ -162,7 +169,7 @@ public class Program
 
     private static async Task RunScan(string profileName, string? outputPath, string format,
         double? minConfidence, bool noCanary, bool noEtw, bool confirmedOnly, bool verbose,
-        string? target, bool lpeOnly, string? logFile, bool verifyLoad,
+        string? target, bool lpeOnly, string? logFile, bool verifyLoad, int canarySettle,
         CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -202,6 +209,7 @@ public class Program
         profile.Verbose = verbose;
         profile.LpeOnly = lpeOnly;
         if (verifyLoad) profile.VerifyLoad = true;
+        if (canarySettle > 0) profile.CanarySettleSeconds = canarySettle;
         if (noCanary) profile.RunCanary = false;
         if (noEtw) profile.RunETW = false;
         if (confirmedOnly) profile.ConfirmedOnly = true;

@@ -98,12 +98,19 @@ public static class AutoElevateEnumerator
 
             if (string.IsNullOrEmpty(serverPath)) return;
 
-            string expanded = Environment.ExpandEnvironmentVariables(serverPath).Trim('"');
-
-            // Strip command-line arguments (LocalServer32 can have them)
-            if (expanded.Contains(' ') && !File.Exists(expanded))
+            // LocalServer32 values are full command lines (e.g. "C:\Program Files\Foo\bar.exe" /sta).
+            // Always parse through CommandLineParser so the executable path is correctly extracted
+            // regardless of quoting — Trim('"') alone corrupts quoted-path-with-args strings.
+            // InprocServer32 values are plain DLL paths (quoted or bare); Trim('"') is safe there.
+            string expanded;
+            if (serverType == "LocalServer32")
             {
-                expanded = CommandLineParser.ExtractExecutablePath(expanded);
+                expanded = CommandLineParser.ExtractExecutablePath(
+                    Environment.ExpandEnvironmentVariables(serverPath));
+            }
+            else
+            {
+                expanded = Environment.ExpandEnvironmentVariables(serverPath).Trim('"');
             }
 
             if (!File.Exists(expanded)) return;

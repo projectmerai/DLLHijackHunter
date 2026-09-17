@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/Platform-Windows-blue?style=for-the-badge&logo=windows" />
   <img src="https://img.shields.io/badge/.NET-8.0_%7C_10.0-purple?style=for-the-badge&logo=dotnet" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Version-2.4.0-orange?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Version-2.5.0-orange?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Black%20Hat%20Arsenal-Sector%202026-CC0000?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Black%20Hat%20Arsenal-Sector%202026-CC0000?style=for-the-badge&logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTV6TTIgMTdsOCA0IDgtNE0yIDEybDggNCA4LTQiLz48L3N2Zz4=" />
 </p>
@@ -139,7 +139,7 @@ sequenceDiagram
     participant V as Victim Binary
 
     H->>B: Build canary DLL
-    B->>B: Extract precompiled canary<br/>(or compile a proxy with MSVC)
+    B->>B: Extract precompiled canary<br/>(synthesise proxy via runtime PE surgery)
     B-->>H: canary.dll + confirmation file path
     H->>H: Place DLL at hijack path
     H->>T: Trigger binary execution
@@ -160,20 +160,19 @@ The canary DLL:
 
 The bundled binaries are built from the auditable source at `src/DLLHijackHunter/Resources/canary_src.c` and can be regenerated with `Resources/build_canary.bat` (requires the MSVC C++ toolchain; the scanner does **not**).
 
-> **Functional-proxy exception:** When a search-order hijack targets a DLL that *exists* and exposes exports, keeping the host alive after confirmation requires an export-forwarding **proxy**, which is compiled per-DLL with MSVC (`cl.exe`, located via `vswhere`/`vcvarsall`). If no toolchain is present, the precompiled canary is used instead — it still **confirms the load** (DllMain fires) but does not forward exports, so the host process may crash after the confirmation is recorded. Phantom-DLL and other no-export candidates need no compiler at all.
+> **Functional-proxy exception:** When a search-order hijack targets a DLL that *exists* and exposes exports, keeping the host alive after confirmation requires an export-forwarding **proxy**. DLLHijackHunter generates this proxy at runtime through **PE surgery** — it grafts a synthesised `.edata` section onto the precompiled embedded canary entirely in-process, with no compiler required. The correct forwarder strings are computed from the victim DLL's export table and encoded directly into the binary. Phantom-DLL and other no-export candidates skip this step entirely; no toolchain is ever needed.
 
 > **Signing:** The embedded canaries are unsigned. Code-signing them (so they load under stricter policies and are attributable) requires a signing certificate and is left as a release-time step for the maintainer.
 
-### Important note on proxy/export-forwarding mode
+### Export-forwarding proxy canaries
 
-Proxy/export-forwarding canaries are **experimental** and **best-effort**. Some targets may fail to load correctly or may behave unexpectedly depending on:
+Proxy canaries are generated via **runtime PE synthesis** (no compiler required) and have been validated against real targets including services and scheduled tasks running as `NT AUTHORITY\SYSTEM`. The following edge cases can still cause a proxy canary to report inconclusive even when the underlying hijack is valid:
 
-- ordinal-only exports
-- decorated export names
-- calling convention mismatches
-- loader/runtime assumptions in the target process
+- ordinal-only exports (name table absent)
+- decorated export names (calling-convention mangling mismatches)
+- loader/runtime assumptions in the target process that require the *real* DLL to be resident
 
-That means a failed proxy canary does **not always** mean the underlying hijack path is impossible.
+A failed proxy canary does **not** mean the hijack path is impossible — it means execution confirmation is inconclusive for that specific target.
 
 ---
 
@@ -222,10 +221,10 @@ Design and safety notes:
 | Self-contained binary | ✅ | ❌ | ❌ | ✅ | ❌ |
 
 <sub>
-¹ Precompiled dual-arch canaries are embedded — **no compiler needed** to confirm a load. Only the optional export-forwarding *proxy* (to keep an export-consuming host alive) needs MSVC.<br/>
+¹ Precompiled dual-arch canaries are embedded — **no compiler needed** to confirm a load. Export-forwarding proxies are also generated at runtime via PE surgery — no compiler required; MSVC is a stripped-build fallback only when the embedded precompiled canary binary is absent from the assembly resources.<br/>
 ² Via attacker-relative ACL writability (see Filter Pipeline). It reduces — it does not eliminate — false positives; soft-gate heuristics (manifest/SxS/LoadLibraryEx) still carry uncertainty. Unverified static findings are now capped below the **High** tier.<br/>
 ³ Derived from auto-start status, not a verified reboot test.<br/>
-⁴ Export-forwarding proxy is experimental/best-effort (see note above).<br/>
+⁴ Export-forwarding proxies are generated via runtime PE synthesis (no compiler required); edge cases such as ordinal-only exports or decorated names may limit confirmation on specific targets.<br/>
 ⁵ Service/Task/COM triggers only; UAC-bypass findings are not canary-triggered.<br/>
 ⁶ Backed by a bundled snapshot of the HijackLibs dataset (~590 entries); refreshable from hijacklibs.net.
 </sub>
@@ -288,7 +287,9 @@ Options:
   -o, --output <path>            Output file path (auto-detects format)
   -f, --format <format>          Output format [default: console]
                                    console | json | html
-  -t, --target <target>          Target specific binary, directory, or filename
+  -t, --target <target>          Target specific binary, directory, or filename.
+                                   Also scopes ETW event capture to that process and
+                                   suppresses system-wide PATH analysis.
       --min-confidence <value>   Minimum confidence threshold 0-100. When omitted, each
                                    profile's own threshold applies; passing this overrides it.
       --no-canary                Disable canary confirmation
@@ -334,7 +335,7 @@ Confirmed canary execution should be treated as the strongest validation signal.
 
 Because writability is evaluated **attacker-relative**, both elevated and standard-user runs are meaningful:
 
-- For LPE triage, the most trustworthy configuration is a **standard-user run with `--lpe-only`** (and `--no-canary` if a compiler isn't available) — every surviving finding is genuinely writable by an unprivileged principal.
+- For LPE triage, the most trustworthy configuration is a **standard-user run with `--lpe-only`** — every surviving finding is genuinely writable by an unprivileged principal. Add `--no-canary` only when passive, no-file-drop operation is required; no compiler is needed for canary mode.
 - Elevated runs are required for ETW and canary confirmation, and are now safe from the historical "everything in System32 looks writable" inversion.
 
 ---

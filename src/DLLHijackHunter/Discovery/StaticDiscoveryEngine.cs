@@ -15,6 +15,17 @@ public class StaticDiscoveryEngine
     private static readonly Lazy<HashSet<string>> KnownDllsCache = new(() =>
         Filters.KnownDllsFilter.LoadKnownDlls(@"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs"));
 
+    // Lazily-built set of all directories listed in %PATH% (case-insensitive on Windows).
+    // Used to reclassify hijack candidates whose writable position is in a PATH directory
+    // (rather than the binary's own directory) as EnvPath, enabling cross-binary dedup.
+    private static readonly Lazy<HashSet<string>> PathDirSet = new(() =>
+    {
+        var dirs = Environment.GetEnvironmentVariable("PATH")?.Split(';',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            ?? Array.Empty<string>();
+        return new HashSet<string>(dirs, StringComparer.OrdinalIgnoreCase);
+    });
+
     private static HashSet<string> LoadPhantomDlls()
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -248,8 +259,13 @@ public class StaticDiscoveryEngine
             }
 
             // ─── Check PATH directories for writable entries ───
-            ctx.Status("[yellow]Weaponizing writable PATH directories...[/]");
-            CheckWritablePathDirectories(candidates, contexts);
+            // Skip when --target is set: PATH weaponization is system-wide and not meaningful
+            // in a targeted scan — the writable dirs are global regardless of target scope.
+            if (string.IsNullOrEmpty(_profile.TargetPath))
+            {
+                ctx.Status("[yellow]Weaponizing writable PATH directories...[/]");
+                CheckWritablePathDirectories(candidates, contexts);
+            }
 
             AnsiConsole.MarkupLine($"  [green]Generated {candidates.Count} candidates[/]");
             ScanLogger.Debug($"Static discovery complete: {candidates.Count} total candidates generated");
@@ -281,12 +297,23 @@ public class StaticDiscoveryEngine
             var bestCtx = contexts.OrderByDescending(c => GetContextPriority(c)).First();
             string? legitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName);
 
+            // Reclassify: if the hijack position is in a PATH directory (not the binary's own
+            // directory or a system directory), mark as EnvPath so the dedup pass can collapse
+            // hundreds of identical (dll, writable-path-dir) findings across many binaries into one.
+            string? hijackDir = Path.GetDirectoryName(hijackPath);
+            string? binaryDir = Path.GetDirectoryName(binaryPath);
+            bool isPathDirHijack = hijackDir != null
+                && PathDirSet.Value.Contains(hijackDir)
+                && !hijackDir.Equals(binaryDir, StringComparison.OrdinalIgnoreCase);
+
             var candidate = new HijackCandidate
             {
                 BinaryPath = binaryPath,
                 DllName = dllName,
                 DllLegitPath = legitPath,
-                Type = legitPath == null ? HijackType.Phantom : HijackType.SearchOrder,
+                Type = isPathDirHijack
+                    ? HijackType.EnvPath
+                    : (legitPath == null ? HijackType.Phantom : HijackType.SearchOrder),
                 HijackWritablePath = hijackPath,
                 Trigger = bestCtx.TriggerType,
                 TriggerIdentifier = bestCtx.TriggerIdentifier,
@@ -298,7 +325,7 @@ public class StaticDiscoveryEngine
                 IsKnownVulnerability = isKnownVuln,
                 KnowledgeBaseReference = kbRef
             };
-            
+
             if (isKnownVuln)
             {
                 candidate.Notes.Add($"[HIJACKLIBS MATCH] Documented vulnerable software detected! Ref: {kbRef}");
@@ -400,13 +427,18 @@ public class StaticDiscoveryEngine
             if (binaryDir != null && AclChecker.IsDirectoryWritableByStandardUser(binaryDir, bestAccount))
             {
                 var bestCtx = contexts.OrderByDescending(c => GetContextPriority(c)).First();
+                string writablePath = Path.Combine(binaryDir, dll);
+
+                // Reclassify PATH-directory positions as EnvPath for cross-binary dedup.
+                bool isPathDir = PathDirSet.Value.Contains(binaryDir);
+
                 candidates.Add(new HijackCandidate
                 {
                     BinaryPath = binaryPath,
                     DllName = dll,
                     DllLegitPath = null,
-                    Type = HijackType.Phantom,
-                    HijackWritablePath = Path.Combine(binaryDir, dll),
+                    Type = isPathDir ? HijackType.EnvPath : HijackType.Phantom,
+                    HijackWritablePath = writablePath,
                     Trigger = bestCtx.TriggerType,
                     TriggerIdentifier = bestCtx.TriggerIdentifier,
                     RunAsAccount = bestCtx.RunAsAccount,

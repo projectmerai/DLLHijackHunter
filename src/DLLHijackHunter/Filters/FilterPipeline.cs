@@ -129,8 +129,16 @@ public class FilterPipeline
     private static List<HijackCandidate> Deduplicate(List<HijackCandidate> candidates)
     {
         return candidates
-            .GroupBy(c => $"{c.BinaryPath}|{c.DllName}|{c.HijackWritablePath}",
-                StringComparer.OrdinalIgnoreCase)
+            .GroupBy(c =>
+            {
+                // EnvPath candidates are PATH-directory hijacks: the attack is the (dll, dir)
+                // slot, not any specific binary that happens to load that dll. Grouping by
+                // (dll, path) collapses hundreds of per-binary duplicates into one finding
+                // while keeping the highest-priority trigger (service > task > …) in the group.
+                if (c.Type == HijackType.EnvPath)
+                    return $"ENVPATH|{c.DllName}|{c.HijackWritablePath}";
+                return $"{c.BinaryPath}|{c.DllName}|{c.HijackWritablePath}";
+            }, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.OrderByDescending(c => c.Confidence)
                          .ThenByDescending(c => GetTriggerPriority(c.Trigger))
                          .First())

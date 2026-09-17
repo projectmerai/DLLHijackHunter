@@ -41,3 +41,4 @@ run_matrix.ps1
 
 # AI analysis artifacts
 docs/analysis/
+hijackrange_results.json

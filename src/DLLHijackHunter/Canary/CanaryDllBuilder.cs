@@ -36,25 +36,34 @@ public static class CanaryDllBuilder
         bool proxyDesired = originalDllPath != null && File.Exists(originalDllPath)
                             && PEAnalyzer.GetExports(originalDllPath).Any();
 
-        // 1) Functional proxy — only when the toolchain is available.
+        // 1) Functional proxy via runtime PE synthesis — NO toolchain required.
+        //    Graft an export-forwarding table onto the embedded canary so every export of the
+        //    original forwards to a sidecar copy of it (see CanaryEngine, which stages the
+        //    sidecar). A host that binds those exports at load time (a static import) then
+        //    resolves them, the process starts, DllMain fires, and host functionality survives.
+        //    This replaces the old cl.exe/vcvarsall compile path, which required MSVC.
         if (proxyDesired)
         {
-            string source = GenerateCanarySource(originalDllPath);
-            string sourcePath = Path.Combine(CanaryDir, $"canary_{canaryId}.c");
-            File.WriteAllText(sourcePath, source);
-            if (CompileCanary(sourcePath, canaryDllPath, is64Bit))
+            var exports = PEAnalyzer.GetExportEntries(originalDllPath!);
+            if (exports.Count > 0 && TryGetEmbeddedCanaryBytes(is64Bit, out var baseCanary))
             {
-                return new CanaryDllInfo
+                string forwardModuleBase = GetForwardModuleBase(deployPath);
+                if (RuntimeProxyBuilder.TryBuild(baseCanary, forwardModuleBase, exports,
+                        out var proxyBytes))
                 {
-                    CanaryId = canaryId,
-                    DllPath = canaryDllPath,
-                    ConfirmPath = confirmPath,
-                    SourcePath = sourcePath,
-                    IsProxy = true
-                };
+                    File.WriteAllBytes(canaryDllPath, proxyBytes);
+                    return new CanaryDllInfo
+                    {
+                        CanaryId = canaryId,
+                        DllPath = canaryDllPath,
+                        ConfirmPath = confirmPath,
+                        SourcePath = "",
+                        IsProxy = true
+                    };
+                }
             }
-            ScanLogger.Warn("[Canary] No MSVC toolchain for a functional proxy; using the " +
-                "precompiled canary (confirms the load but does not preserve host functionality).");
+            ScanLogger.Warn("[Canary] Runtime proxy synthesis failed; falling back to the " +
+                "export-less precompiled canary (a load-time named import may fail to load).");
         }
 
         // 2) Default: precompiled, self-locating canary embedded for the victim's bitness.
@@ -111,6 +120,61 @@ public static class CanaryDllBuilder
             h *= 0x100000001b3UL;
         }
         return h.ToString("x16");
+    }
+
+    /// <summary>
+    /// The forward-target module base name (no extension) for a canary deployed to
+    /// <paramref name="deployPath"/>: "&lt;deployfilename&gt;_hhorig". The runtime proxy's
+    /// export forwarders target this module; its sidecar DLL (a copy of the original, see
+    /// <see cref="GetSidecarPath"/>) is staged beside the deploy location so they resolve.
+    /// NOTE: underscore (not dot) is used so the Windows loader's first-dot split correctly
+    /// identifies the module boundary in the forwarder string.
+    /// </summary>
+    public static string GetForwardModuleBase(string deployPath) =>
+        // PE forwarder strings are split at the FIRST dot by the Windows loader.
+        // Using ".hhorig" produces "foo.hhorig.Export" which the loader misparses as
+        // module="foo" (the canary itself) with export="hhorig.Export" — not found,
+        // so the import snap fails before DllMain runs. Using "_hhorig" (underscore)
+        // produces "foo_hhorig.Export" — one dot, unambiguous, resolves to sidecar.
+        Path.GetFileNameWithoutExtension(deployPath) + "_hhorig";
+
+    /// <summary>
+    /// The sidecar path (the runtime proxy's forward target) for a canary deployed to
+    /// <paramref name="deployPath"/>: a copy of the original DLL under a distinct name in the
+    /// same directory, so forwarders point at real code rather than at the canary itself.
+    /// </summary>
+    public static string GetSidecarPath(string deployPath)
+    {
+        string dir = Path.GetDirectoryName(deployPath) ?? "";
+        return Path.Combine(dir, GetForwardModuleBase(deployPath) + ".dll");
+    }
+
+    /// <summary>
+    /// Read the embedded precompiled canary for the victim bitness into memory (the base PE the
+    /// runtime proxy builder grafts an export table onto).
+    /// </summary>
+    public static bool TryGetEmbeddedCanaryBytes(bool is64Bit, out byte[] bytes)
+    {
+        bytes = Array.Empty<byte>();
+        string leaf = is64Bit ? "canary_x64.dll" : "canary_x86.dll";
+        try
+        {
+            var asm = Assembly.GetExecutingAssembly();
+            string? name = asm.GetManifestResourceNames()
+                .FirstOrDefault(n => n.EndsWith(leaf, StringComparison.OrdinalIgnoreCase));
+            if (name == null) return false;
+
+            using var s = asm.GetManifestResourceStream(name);
+            if (s == null) return false;
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            bytes = ms.ToArray();
+            return bytes.Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
