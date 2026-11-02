@@ -89,9 +89,7 @@ public static class SearchOrderCalculator
         // A service-account target only ever searches the machine PATH; using the scanner's
         // PATH would add per-user PATH directories (e.g. C:\Python311 from the admin's
         // user PATH) that the target never consults — false-positive hijack positions.
-        string[]? pathDirs = IsServiceAccount(runAsAccount)
-            ? (_machinePathDirs.Value ?? GetProcessPathDirs())
-            : GetProcessPathDirs();
+        string[]? pathDirs = GetPathDirsFor(runAsAccount);
 
         var order = GetSearchOrder(binaryPath, dllName, pathDirs);
         string? actualLocation = order.FirstOrDefault(p => !p.StartsWith("[CWD]") && File.Exists(p));
@@ -126,11 +124,31 @@ public static class SearchOrderCalculator
         return hijackable;
     }
 
+    /// <summary>
+    /// Like <see cref="FindActualDllLocation(string, string)"/> but evaluated with the PATH the
+    /// target identity actually sees (machine PATH for service accounts).
+    /// </summary>
+    internal static string? FindActualDllLocation(string binaryPath, string dllName, string? runAsAccount)
+    {
+        var order = GetSearchOrder(binaryPath, dllName, GetPathDirsFor(runAsAccount));
+        return order.FirstOrDefault(p => !p.StartsWith("[CWD]") && File.Exists(p));
+    }
+
+    /// <summary>
+    /// The PATH directories a process running as <paramref name="runAsAccount"/> searches:
+    /// the machine-wide PATH for SYSTEM / LOCAL SERVICE / NETWORK SERVICE, otherwise the
+    /// scanner's PATH (machine PATH + the interactive user's per-user PATH).
+    /// </summary>
+    internal static string[]? GetPathDirsFor(string? runAsAccount) =>
+        IsServiceAccount(runAsAccount)
+            ? (_machinePathDirs.Value ?? GetProcessPathDirs())
+            : GetProcessPathDirs();
+
     private static string[]? GetProcessPathDirs() =>
         Environment.GetEnvironmentVariable("PATH")?.Split(';',
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-    private static bool IsServiceAccount(string? account)
+    internal static bool IsServiceAccount(string? account)
     {
         if (string.IsNullOrWhiteSpace(account)) return false;
         return account.ToUpperInvariant() is
