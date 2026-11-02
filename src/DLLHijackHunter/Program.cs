@@ -345,6 +345,23 @@ public class Program
             }
             
             stopwatch.Stop();
+
+            // Still honour the requested report (-o report.html / .json): a missing file is
+            // indistinguishable from a failed run for anyone consuming the output.
+            var noCandidatesResult = new ScanResult
+            {
+                ScanDate = DateTime.UtcNow,
+                ScanMode = "Static" + (etwWillRun ? " + ETW" : ""),
+                ProfileUsed = profile.Name,
+                ScanDuration = stopwatch.Elapsed,
+                TotalCandidatesDiscovered = 0,
+                EliminatedByFilters = 0
+            };
+            if (outputPath != null || format is "json" or "html")
+                await GenerateOutput(noCandidatesResult, format, outputPath);
+
+            AnsiConsole.MarkupLine($"\n[bold green]Scan complete in {stopwatch.Elapsed:mm\\:ss}[/]");
+            AnsiConsole.MarkupLine("[bold]Findings: 0[/] (no candidates discovered)");
             return;
         }
 
@@ -376,6 +393,9 @@ public class Program
             };
 
             await GenerateOutput(emptyResult, format, outputPath);
+
+            AnsiConsole.MarkupLine($"\n[bold green]Scan complete in {stopwatch.Elapsed:mm\\:ss}[/]");
+            AnsiConsole.MarkupLine("[bold]Findings: 0[/] (all candidates eliminated by filters)");
             return;
         }
 
