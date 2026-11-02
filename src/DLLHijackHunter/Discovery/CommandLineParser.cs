@@ -87,15 +87,28 @@ namespace DLLHijackHunter.Discovery
             }
             else if (fileName == "rundll32.exe" || fileName == "rundll32")
             {
-                // rundll32 path\to\dll,Export
-                string innerDll = ExtractFirstToken(arguments, out string dllArgs);
-                
-                int commaIdx = innerDll.IndexOf(',');
-                if (commaIdx > 0)
+                // rundll32 path\to\dll,Export [args]
+                // Quoted:   "C:\Program Files\x\a.dll",Run   → token parser handles it.
+                // Unquoted: C:\Program Files\x\a.dll,Run     → the DLL path ends at the first
+                //           comma, not the first space, so split on the comma first.
+                string argsTrim = arguments.Trim();
+                string innerDll;
+                int firstComma = argsTrim.IndexOf(',');
+                if (!argsTrim.StartsWith("\"") && firstComma > 0 &&
+                    File.Exists(Environment.ExpandEnvironmentVariables(argsTrim.Substring(0, firstComma).Trim())))
                 {
-                    innerDll = innerDll.Substring(0, commaIdx);
+                    innerDll = Environment.ExpandEnvironmentVariables(argsTrim.Substring(0, firstComma).Trim());
                 }
-                return innerDll;
+                else
+                {
+                    innerDll = ExtractFirstToken(argsTrim, out _);
+                    int commaIdx = innerDll.IndexOf(',');
+                    if (commaIdx > 0)
+                    {
+                        innerDll = innerDll.Substring(0, commaIdx);
+                    }
+                }
+                return innerDll.Trim().Trim('"');
             }
 
             return targetPath;
@@ -146,7 +159,11 @@ namespace DLLHijackHunter.Discovery
                     if (File.Exists(Environment.ExpandEnvironmentVariables(progressivePath)) || 
                         File.Exists(Environment.ExpandEnvironmentVariables(progressivePath) + ".exe"))
                     {
-                        path = progressivePath;
+                        // Return the name that actually exists on disk: when only "<path>.exe"
+                        // matched, the extension-less path would fail every later File.Exists.
+                        path = File.Exists(Environment.ExpandEnvironmentVariables(progressivePath))
+                            ? progressivePath
+                            : progressivePath + ".exe";
                         
                         // Rebuild remaining args
                         if (partIdx < remainingParts.Length)

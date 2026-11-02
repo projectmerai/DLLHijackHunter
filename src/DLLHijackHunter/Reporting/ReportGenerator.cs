@@ -19,11 +19,12 @@ public static class ReportGenerator
             .AddColumn("[bold]Property[/]")
             .AddColumn("[bold]Value[/]");
 
-        summaryTable.AddRow("Hostname", result.Hostname);
-        summaryTable.AddRow("OS Version", result.OSVersion);
+        // Table.AddRow(string) parses Spectre markup — escape every data value.
+        summaryTable.AddRow("Hostname", Markup.Escape(result.Hostname));
+        summaryTable.AddRow("OS Version", Markup.Escape(result.OSVersion));
         summaryTable.AddRow("Scan Date", result.ScanDate.ToString("yyyy-MM-dd HH:mm:ss UTC"));
-        summaryTable.AddRow("Scan Mode", result.ScanMode);
-        summaryTable.AddRow("Profile", result.ProfileUsed);
+        summaryTable.AddRow("Scan Mode", Markup.Escape(result.ScanMode));
+        summaryTable.AddRow("Profile", Markup.Escape(result.ProfileUsed));
         summaryTable.AddRow("Duration", result.ScanDuration.ToString(@"mm\:ss"));
         summaryTable.AddRow("Total Candidates", result.TotalCandidatesDiscovered.ToString());
         summaryTable.AddRow("Eliminated (Filters)", result.EliminatedByFilters.ToString());
@@ -41,6 +42,8 @@ public static class ReportGenerator
             .AddItem("HIGH", result.High.Count, Color.Orange1)
             .AddItem("MEDIUM", result.Medium.Count, Color.Yellow)
             .AddItem("LOW", result.Low.Count, Color.Grey);
+        if (result.Informational.Count > 0)
+            tierChart.AddItem("INFO", result.Informational.Count, Color.DarkSlateGray1);
 
         AnsiConsole.Write(tierChart);
         AnsiConsole.WriteLine();
@@ -72,18 +75,21 @@ public static class ReportGenerator
             new Markup($"[bold]DLL:[/]      {Markup.Escape(c.DllName)} [dim]({c.Type})[/]"),
             new Markup($"[bold]Path:[/]     {Markup.Escape(c.HijackWritablePath)}"),
             new Markup($"[bold]Trigger:[/]  {c.Trigger} \"{Markup.Escape(c.TriggerIdentifier)}\"" +
-                (c.ServiceStartType != null ? $" ({c.ServiceStartType})" : "")),
+                (c.ServiceStartType != null ? $" ({Markup.Escape(c.ServiceStartType)})" : "")),
             new Markup($"[bold]Runs As:[/]  {Markup.Escape(c.RunAsAccount)}"),
             new Markup($"[bold]Proven:[/]   " + (c.CanaryResult == CanaryResult.Fired
                 ? $"[green]✓ Canary fired as {Markup.Escape(c.ConfirmedPrivilege ?? "?")}, " +
-                  $"{c.ConfirmedIntegrityLevel} integrity[/]"
+                  $"{Markup.Escape(c.ConfirmedIntegrityLevel ?? "?")} integrity[/]"
                 : c.CanaryResult == CanaryResult.NotTested
                     ? "[yellow]○ Not tested[/]"
                     : $"[red]✗ {c.CanaryResult}[/]")),
             new Markup($"[bold]Survives Reboot:[/] " +
                 (c.SurvivesReboot ? "[green]✓ Yes[/]" : "[dim]No[/]")),
             new Markup($"[bold]Use Cases:[/] " +
-                (c.UseCases.Any() ? string.Join(", ", c.UseCases) : "General")),
+                Markup.Escape(c.UseCases.Any() ? string.Join(", ", c.UseCases) : "General")),
+            new Markup($"[bold]Source:[/]   {Markup.Escape(c.DiscoverySource)}" +
+                (c.LoadProbe != LoadProbeResult.NotRun ? $" | [bold]Load probe:[/] {c.LoadProbe}" : "") +
+                (c.KnowledgeBaseReference != null ? $" | [bold]KB:[/] {Markup.Escape(c.KnowledgeBaseReference)}" : "")),
             c.Notes.Any()
                 ? new Markup($"\n[dim]{string.Join("\n", c.Notes.Select(n => "  • " + Markup.Escape(n)))}[/]")
                 : new Markup("")
@@ -131,10 +137,10 @@ public static class ReportGenerator
 
         foreach (var chain in chains)
         {
-            var root = new Tree(new Markup($"[bold cyan]{chain.Name}[/]"));
+            var root = new Tree(new Markup($"[bold cyan]{Markup.Escape(chain.Name)}[/]"));
             root.Style = Style.Parse("cyan");
 
-            root.AddNode(new Markup($"[dim]{chain.Description}[/]"));
+            root.AddNode(new Markup($"[dim]{Markup.Escape(chain.Description)}[/]"));
             var pathNode = root.AddNode(new Markup("[bold yellow]Attack Path:[/]"));
 
             foreach (var step in chain.Steps)
@@ -150,7 +156,8 @@ public static class ReportGenerator
                     var detailsTable = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
                     detailsTable.AddColumn("Target");
                     detailsTable.AddColumn("Vector");
-                    detailsTable.AddRow(Path.GetFileName(step.Finding.BinaryPath), step.Finding.Type.ToString());
+                    detailsTable.AddRow(Markup.Escape(Path.GetFileName(step.Finding.BinaryPath)),
+                        step.Finding.Type.ToString());
                     stepNode.AddNode(detailsTable);
                 }
             }

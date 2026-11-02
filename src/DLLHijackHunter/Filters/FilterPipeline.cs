@@ -82,9 +82,14 @@ public class FilterPipeline
                             candidate.Notes.Add($"[{gate.Name}] -{penalty:F0}%: {reason}");
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Soft gate evaluation failed — don't penalize
+                    // Soft gate evaluation failed — don't penalize, but make it visible:
+                    // a silently skipped gate looks identical to a clean pass.
+                    candidate.FilterResults[$"Gate:{gate.Name}"] = FilterResult.Skipped;
+                    candidate.Notes.Add($"[{gate.Name}] skipped — evaluation error: {ex.Message}");
+                    ScanLogger.Debug($"Soft gate '{gate.Name}' failed for {candidate.BinaryPath} → " +
+                        $"{candidate.DllName}: {ex}");
                 }
             }
 
@@ -114,6 +119,16 @@ public class FilterPipeline
             if (remaining.Count < beforePrivFilter)
                 AnsiConsole.MarkupLine($"  [yellow]Removed {beforePrivFilter - remaining.Count} " +
                     "same-privilege candidates (profile setting)[/]");
+        }
+
+        if (!_profile.IncludePPL)
+        {
+            int beforePplFilter = remaining.Count;
+            remaining = remaining.Where(c => !c.IsProtectedProcess).ToList();
+
+            if (remaining.Count < beforePplFilter)
+                AnsiConsole.MarkupLine($"  [yellow]Removed {beforePplFilter - remaining.Count} " +
+                    "protected-process (PPL / FORCE_INTEGRITY) candidates (profile setting)[/]");
         }
 
         // NOTE: Target filtering is handled upstream in StaticDiscoveryEngine.FilterByTarget()

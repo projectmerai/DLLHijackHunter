@@ -19,13 +19,16 @@ public class ScanResult
     public List<HijackCandidate> High { get; set; } = new();
     public List<HijackCandidate> Medium { get; set; } = new();
     public List<HijackCandidate> Low { get; set; } = new();
+    // Below the Low tier (<20% confidence) but above the profile's MinConfidence — e.g. the
+    // aggressive profile's 15% threshold or an explicit --min-confidence below 20.
+    public List<HijackCandidate> Informational { get; set; } = new();
 
     public List<HijackCandidate> AllFindings =>
-        Confirmed.Concat(High).Concat(Medium).Concat(Low)
+        Confirmed.Concat(High).Concat(Medium).Concat(Low).Concat(Informational)
                  .OrderByDescending(c => c.FinalScore).ToList();
 
     public int TotalFindings =>
-        Confirmed.Count + High.Count + Medium.Count + Low.Count;
+        Confirmed.Count + High.Count + Medium.Count + Low.Count + Informational.Count;
 
     // Attack chain analysis
     public List<AttackChain> AttackChains { get; set; } = new();

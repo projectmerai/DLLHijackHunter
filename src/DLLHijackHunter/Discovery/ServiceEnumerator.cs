@@ -80,10 +80,17 @@ public static class ServiceEnumerator
                         }
                     }
                 }
-                catch { continue; }
+                catch (Exception ex)
+                {
+                    ScanLogger.Debug($"Service enumeration failed for '{serviceName}': {ex.Message}");
+                    continue;
+                }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"Service enumeration failed: {ex.Message}");
+        }
 
         return results;
     }

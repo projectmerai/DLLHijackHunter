@@ -36,6 +36,51 @@ public static class LoadProbe
         SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern IntPtr LoadLibraryW(string lpLibFileName);
 
+    // SetDllDirectory inserts a directory into the classic search order immediately after
+    // the application directory and BEFORE System32 — exactly where a hijacking DLL in the
+    // target's own (application) directory sits relative to the system copy.
+    [System.Runtime.InteropServices.DllImport("kernel32.dll",
+        SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetDllDirectoryW(string? lpPathName);
+
+    /// <summary>
+    /// Child-process entry point for application-directory positions: models the target
+    /// loading a DLL by name from its own directory under the classic (non-opt-in) search
+    /// order — KnownDLLs first, then the app directory, then System32.
+    /// </summary>
+    internal static int RunChildAppDir(string appDir, string dllName)
+    {
+        try
+        {
+            if (!Directory.Exists(appDir) || !SetDllDirectoryW(appDir))
+            {
+                Console.Out.Write("NOTRESOLVED");
+                return 0;
+            }
+
+            IntPtr h = LoadLibraryW(dllName);
+            if (h == IntPtr.Zero)
+            {
+                Console.Out.Write("NOTRESOLVED");
+                return 0;
+            }
+
+            var sb = new StringBuilder(1024);
+            NativeMethods.GetModuleFileNameW(h, sb, 1024);
+            NativeMethods.FreeLibrary(h);
+
+            string resolved = sb.ToString();
+            Console.Out.Write(string.IsNullOrEmpty(resolved) ? "NOTRESOLVED" : "RESOLVED=" + resolved);
+            return 0;
+        }
+        catch
+        {
+            Console.Out.Write("NOTRESOLVED");
+            return 0;
+        }
+    }
+
     /// <summary>
     /// Child-process entry point. Adds <paramref name="addDir"/> to the DLL search path, resolves
     /// <paramref name="dllName"/> via the loader, and prints "RESOLVED=&lt;path&gt;" or "NOTRESOLVED".
@@ -171,10 +216,18 @@ public static class LoadProbe
             File.Copy(probeDll, target, true);
             placed = true;
 
-            // Service binaries typically use the classic search order (no opt-in flags),
-            // so model that correctly rather than the modern SEARCH_USER_DIRS order.
-            bool useTraditional = c.Trigger == TriggerType.Service;
-            string output = RunResolveChild(selfExe, dir!, dll, timeoutSec, useTraditional);
+            // Choose the model that matches where the writable position sits:
+            //  • the target's own directory → "appdir" (app dir precedes System32). The old
+            //    CWD model placed it AFTER System32 and wrongly reported LosesToProtected
+            //    for any DLL that also exists in System32.
+            //  • otherwise, service binaries typically use the classic search order (CWD slot),
+            //    everything else the modern SEARCH_USER_DIRS order.
+            string? binaryDir = null;
+            try { binaryDir = Path.GetDirectoryName(c.BinaryPath); } catch { }
+            string mode = PathsEqual(dir!, binaryDir ?? "")
+                ? "appdir"
+                : c.Trigger == TriggerType.Service ? "traditional" : "modern";
+            string output = RunResolveChild(selfExe, dir!, dll, timeoutSec, mode);
 
             if (output.StartsWith("RESOLVED=", StringComparison.Ordinal))
             {
@@ -222,7 +275,7 @@ public static class LoadProbe
     }
 
     private static string RunResolveChild(string selfExe, string dir, string dll,
-        int timeoutSec, bool traditional = false)
+        int timeoutSec, string mode)
     {
         try
         {
@@ -237,7 +290,7 @@ public static class LoadProbe
             psi.ArgumentList.Add("--resolve-probe");
             psi.ArgumentList.Add(dir);
             psi.ArgumentList.Add(dll);
-            if (traditional) psi.ArgumentList.Add("traditional");
+            if (mode != "modern") psi.ArgumentList.Add(mode);
 
             using var p = Process.Start(psi);
             if (p == null) return "NOTRESOLVED";
