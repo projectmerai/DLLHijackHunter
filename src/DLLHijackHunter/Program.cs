@@ -20,8 +20,12 @@ public class Program
         // to the search path and print where the real loader resolved it. Must run before any
         // banner/scan setup. Output is a single token on stdout consumed by the parent.
         if (args.Length >= 3 && args[0] == "--resolve-probe")
+        {
+            if (args.Length > 3 && args[3] == "appdir")
+                return LoadProbe.RunChildAppDir(args[1], args[2]);
             return LoadProbe.RunChild(args[1], args[2],
                 traditional: args.Length > 3 && args[3] == "traditional");
+        }
 
         // Prevent accidental scan freezes from the legacy console's QuickEdit Mode:
         // a stray click in the window would otherwise put it into mark/select mode and
@@ -263,9 +267,11 @@ public class Program
         }
 
         AnsiConsole.MarkupLine($"[bold]Profile:[/] {profile.Name}");
-        AnsiConsole.MarkupLine($"[bold]Mode:[/] Static" +
-            (profile.RunETW ? " + ETW" : "") +
-            (profile.RunCanary ? " + Canary" : ""));
+        // Report what will actually run: ETW and canary are skipped without elevation.
+        bool etwWillRun = profile.RunETW && isElevated;
+        bool canaryWillRun = profile.RunCanary && isElevated;
+        string scanMode = "Static" + (etwWillRun ? " + ETW" : "") + (canaryWillRun ? " + Canary" : "");
+        AnsiConsole.MarkupLine($"[bold]Mode:[/] {scanMode}");
         AnsiConsole.MarkupLine($"[bold]Min Confidence:[/] {profile.MinConfidence}%");
         AnsiConsole.MarkupLine($"[bold]Elevated:[/] {(isElevated ? "[green]Yes[/]" : "[yellow]No[/]")}");
         
@@ -362,7 +368,7 @@ public class Program
             var emptyResult = new ScanResult
             {
                 ScanDate = DateTime.UtcNow,
-                ScanMode = "Static" + (profile.RunETW ? " + ETW" : ""),
+                ScanMode = "Static" + (etwWillRun ? " + ETW" : ""),
                 ProfileUsed = profile.Name,
                 ScanDuration = stopwatch.Elapsed,
                 TotalCandidatesDiscovered = totalDiscovered,
@@ -428,8 +434,7 @@ public class Program
         var scanResult = new ScanResult
         {
             ScanDate = DateTime.UtcNow,
-            ScanMode = "Static" + (profile.RunETW ? " + ETW" : "") +
-                      (profile.RunCanary ? " + Canary" : ""),
+            ScanMode = scanMode,
             ProfileUsed = profile.Name,
             ScanDuration = stopwatch.Elapsed,
             TotalCandidatesDiscovered = totalDiscovered,
@@ -438,7 +443,8 @@ public class Program
             Confirmed = candidates.Where(c => c.Tier == ConfidenceTier.Confirmed).ToList(),
             High = candidates.Where(c => c.Tier == ConfidenceTier.High).ToList(),
             Medium = candidates.Where(c => c.Tier == ConfidenceTier.Medium).ToList(),
-            Low = candidates.Where(c => c.Tier == ConfidenceTier.Low).ToList()
+            Low = candidates.Where(c => c.Tier == ConfidenceTier.Low).ToList(),
+            Informational = candidates.Where(c => c.Tier == ConfidenceTier.Informational).ToList()
         };
         scanResult.AttackChains = correlator.BuildChains(scanResult.AllFindings);
 
@@ -449,7 +455,8 @@ public class Program
             $"([red]{scanResult.Confirmed.Count} confirmed[/] | " +
             $"[orange1]{scanResult.High.Count} high[/] | " +
             $"[yellow]{scanResult.Medium.Count} medium[/] | " +
-            $"[grey]{scanResult.Low.Count} low[/])");
+            $"[grey]{scanResult.Low.Count} low[/]" +
+            (scanResult.Informational.Count > 0 ? $" | [dim]{scanResult.Informational.Count} info[/]" : "") + ")");
         }
         finally
         {
