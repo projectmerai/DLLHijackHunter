@@ -38,10 +38,19 @@ public static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern uint QueryDosDeviceW(string? lpDeviceName, StringBuilder lpTargetPath, uint ucchMax);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    // CharSet.Unicode is required: without it the StringBuilder is marshalled as ANSI
+    // into this wide-character API and the returned path is garbage.
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool QueryFullProcessImageNameW(IntPtr hProcess, uint dwFlags,
         StringBuilder lpExeName, ref uint lpdwSize);
+
+    // PROCESS_QUERY_LIMITED_INFORMATION works even against protected (PPL) processes.
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, int dwProcessId);
 
     // ─── Advapi32 ───
     [DllImport("advapi32.dll", SetLastError = true)]
