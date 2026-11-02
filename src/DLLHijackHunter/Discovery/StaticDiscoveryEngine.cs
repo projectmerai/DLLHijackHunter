@@ -26,6 +26,23 @@ public class StaticDiscoveryEngine
         return new HashSet<string>(dirs, StringComparer.OrdinalIgnoreCase);
     });
 
+    // HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options
+    //   DevOverrideEnable (DWORD) = 1 → .local redirection honoured even for manifested EXEs.
+    private static readonly Lazy<bool> DevOverrideEnabled = new(() =>
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options");
+            return key?.GetValue("DevOverrideEnable") is int v && v != 0;
+        }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"Could not read DevOverrideEnable: {ex.Message}");
+            return false;
+        }
+    });
+
     private static HashSet<string> LoadPhantomDlls()
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -51,9 +68,10 @@ public class StaticDiscoveryEngine
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
             // Fallback: return empty set if resource loading fails
+            ScanLogger.Debug($"Phantom DLL database could not be loaded: {ex.Message}");
         }
         return set;
     }
@@ -242,7 +260,11 @@ public class StaticDiscoveryEngine
                 try
                 {
                     var peResult = PEAnalyzer.Analyze(binaryPath);
-                    if (peResult.AnalysisError != null) continue;
+                    if (peResult.AnalysisError != null)
+                    {
+                        ScanLogger.Debug($"PE analysis skipped {binaryPath}: {peResult.AnalysisError}");
+                        continue;
+                    }
 
                     // For each imported DLL, check for hijack opportunities
                     foreach (string dll in peResult.AllImportedDlls)
@@ -255,7 +277,11 @@ public class StaticDiscoveryEngine
                     // Check for phantom DLLs from our database
                     CheckPhantomDlls(binaryPath, executionContexts, peResult, candidates);
                 }
-                catch { continue; }
+                catch (Exception ex)
+                {
+                    ScanLogger.Debug($"Static analysis failed for {binaryPath}: {ex.Message}");
+                    continue;
+                }
             }
 
             // ─── Check PATH directories for writable entries ───
@@ -295,7 +321,7 @@ public class StaticDiscoveryEngine
         foreach (var hijackPath in hijackPositions)
         {
             var bestCtx = contexts.OrderByDescending(c => GetContextPriority(c)).First();
-            string? legitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName);
+            string? legitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName, bestAccount);
 
             // Reclassify: if the hijack position is in a PATH directory (not the binary's own
             // directory or a system directory), mark as EnvPath so the dedup pass can collapse
@@ -338,7 +364,13 @@ public class StaticDiscoveryEngine
         string dotLocalDllPath = Path.Combine(dotLocalDir, dllName);
         string? dotLocalParent = Path.GetDirectoryName(binaryPath);
 
-        if (dotLocalParent != null &&
+        // The loader ignores <exe>.local for any executable with an (embedded or external)
+        // manifest unless IFEO DevOverrideEnable=1 is set machine-wide — and nearly every
+        // modern EXE carries a manifest. Only emit DotLocal where redirection is honoured.
+        bool dotLocalHonoured = !peResult.HasEmbeddedManifest || DevOverrideEnabled.Value;
+
+        if (dotLocalHonoured &&
+            dotLocalParent != null &&
             AclChecker.IsDirectoryWritableByStandardUser(dotLocalParent, bestAccount) &&
             !Directory.Exists(dotLocalDir))
         {
@@ -347,7 +379,7 @@ public class StaticDiscoveryEngine
             {
                 BinaryPath = binaryPath,
                 DllName = dllName,
-                DllLegitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName),
+                DllLegitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName, bestAccount),
                 Type = HijackType.DotLocal,
                 HijackWritablePath = dotLocalDllPath,
                 Trigger = bestCtx.TriggerType,
@@ -420,7 +452,7 @@ public class StaticDiscoveryEngine
         {
             if (!PhantomDllDatabase.Value.Contains(dll)) continue;
 
-            string? actualLocation = SearchOrderCalculator.FindActualDllLocation(binaryPath, dll);
+            string? actualLocation = SearchOrderCalculator.FindActualDllLocation(binaryPath, dll, bestAccount);
             if (actualLocation != null) continue;
 
             string? binaryDir = Path.GetDirectoryName(binaryPath);
@@ -452,13 +484,16 @@ public class StaticDiscoveryEngine
 
     private void CheckWritablePathDirectories(List<HijackCandidate> candidates, List<DiscoveryContext> contexts)
     {
-        var pathDirs = Environment.GetEnvironmentVariable("PATH")?.Split(';',
-            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-        if (pathDirs == null) return;
+        // Every global target below is a service. A service account only ever searches the
+        // MACHINE PATH, so a writable directory that exists only in the scanning user's
+        // per-user PATH (e.g. C:\Python311) is not reachable by these services. Collect the
+        // writable directories from the union, then check per target against the PATH that
+        // the target's own identity actually sees.
+        var processPath = SearchOrderCalculator.GetPathDirsFor(null) ?? Array.Empty<string>();
+        var machinePath = SearchOrderCalculator.GetPathDirsFor("NT AUTHORITY\\SYSTEM") ?? Array.Empty<string>();
 
         var writablePaths = new List<string>();
-        foreach (var dir in pathDirs)
+        foreach (var dir in processPath.Concat(machinePath).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             if (!Directory.Exists(dir)) continue;
             if (Native.AclChecker.IsDirectoryWritableByStandardUser(dir)) writablePaths.Add(dir);
@@ -490,8 +525,18 @@ public class StaticDiscoveryEngine
                         c.TriggerType == TriggerType.Service && 
                         c.TriggerIdentifier.Equals(target.Value, StringComparison.OrdinalIgnoreCase));
 
+                    // Skip PATH entries this service's identity never searches.
                     if (svcCtx != null)
                     {
+                        var targetPath = SearchOrderCalculator.GetPathDirsFor(svcCtx.RunAsAccount);
+                        if (targetPath == null ||
+                            !targetPath.Contains(wp, StringComparer.OrdinalIgnoreCase))
+                        {
+                            ScanLogger.Debug($"PATH weaponization: {wp} is not in the PATH seen by " +
+                                $"{svcCtx.TriggerIdentifier} ({svcCtx.RunAsAccount}) — skipped");
+                            continue;
+                        }
+
                         candidates.Add(new HijackCandidate
                         {
                             BinaryPath = svcCtx.BinaryPath,
