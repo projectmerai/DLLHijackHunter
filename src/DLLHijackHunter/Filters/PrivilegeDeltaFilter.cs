@@ -1,5 +1,4 @@
 using DLLHijackHunter.Models;
-using DLLHijackHunter.Native;
 
 namespace DLLHijackHunter.Filters;
 
@@ -12,18 +11,18 @@ public class PrivilegeDeltaFilter : ISoftGate
 {
     public string Name => "Privilege Escalation Delta";
 
-    private readonly int _currentPrivLevel;
-
-    public PrivilegeDeltaFilter()
-    {
-        _currentPrivLevel = TokenHelper.GetCurrentPrivilegeLevel();
-    }
+    // The attacker is always modelled as an unprivileged, medium-integrity standard user —
+    // the same baseline AclChecker uses (hardcoded Users / Authenticated Users / Everyone
+    // SIDs). Comparing against the scanner's own token would make every result depend on
+    // whether the tool happened to be run elevated (High = 3), turning LOCAL SERVICE /
+    // UAC-bypass targets into "same privilege" and standard-user targets into "lower".
+    private const int AttackerBaselinePrivLevel = 2;
 
     public (double penalty, string? reason) Evaluate(HijackCandidate candidate)
     {
         int targetPrivLevel = GetTargetPrivilegeLevel(candidate.RunAsAccount);
 
-        if (targetPrivLevel > _currentPrivLevel)
+        if (targetPrivLevel > AttackerBaselinePrivLevel)
         {
             // Privilege escalation — no penalty
             if (!candidate.UseCases.Contains("Privilege Escalation"))
@@ -32,7 +31,7 @@ public class PrivilegeDeltaFilter : ISoftGate
             return (0, null);
         }
 
-        if (targetPrivLevel == _currentPrivLevel)
+        if (targetPrivLevel == AttackerBaselinePrivLevel)
         {
             // Same privilege — still useful for persistence and evasion
             if (!candidate.UseCases.Contains("Persistence"))
@@ -56,13 +55,13 @@ public class PrivilegeDeltaFilter : ISoftGate
 
             candidate.FilterResults["PrivDelta"] = FilterResult.Failed;
             return (15, $"Same privilege level (target={candidate.RunAsAccount}, " +
-                       $"current={TokenHelper.GetCurrentUsername()}). " +
+                       "attacker=StandardUser). " +
                        "Still useful for persistence/evasion.");
         }
 
         // Target runs at LOWER privilege — minimal value
         candidate.FilterResults["PrivDelta"] = FilterResult.Failed;
-        return (30, $"Target runs at lower privilege than current user");
+        return (30, $"Target runs at lower privilege than the attacker (attacker=StandardUser)");
     }
 
     private static int GetTargetPrivilegeLevel(string runAsAccount)
