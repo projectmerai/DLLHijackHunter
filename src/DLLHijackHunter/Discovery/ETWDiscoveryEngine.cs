@@ -51,6 +51,11 @@ public class ETWDiscoveryEngine
                 KernelTraceEventParser.Keywords.FileIO
             );
 
+            // Kernel ProcessStart only fires for processes created after the session starts;
+            // seed the table with already-running processes so their image loads and failed
+            // lookups can still be attributed.
+            SeedRunningProcesses();
+
             session.Source.Kernel.ProcessStart += OnProcessStart;
             session.Source.Kernel.ImageLoad += OnImageLoad;
             session.Source.Kernel.FileIOCreate += OnFileIOCreate;
@@ -93,7 +98,8 @@ public class ETWDiscoveryEngine
         }
         catch (Exception ex)
         {
-            AnsiConsole.MarkupLine($"[red]ETW error: {ex.Message}[/]");
+            AnsiConsole.MarkupLine($"[red]ETW error: {Markup.Escape(ex.Message)}[/]");
+            ScanLogger.Debug($"ETW error: {ex}");
             try { session.Stop(); } catch { }
         }
 
@@ -151,29 +157,104 @@ public class ETWDiscoveryEngine
     {
         try
         {
-            var ctx = new DiscoveryContext
-            {
-                Pid = data.ProcessID,
-                BinaryPath = data.ImageFileName ?? "",
-                CommandLine = data.CommandLine ?? ""
-            };
-
-            // Enrich with token info if possible
-            try
-            {
-                using var proc = System.Diagnostics.Process.GetProcessById(data.ProcessID);
-                ctx.TokenUser = TokenHelper.GetProcessUser(proc.Handle);
-                ctx.IntegrityLevel = TokenHelper.GetProcessIntegrityLevel(proc.Handle);
-            }
-            catch
-            {
-                ctx.TokenUser = "Unknown";
-                ctx.IntegrityLevel = "Unknown";
-            }
-
-            _processes[data.ProcessID] = ctx;
+            // ImageFileName in the kernel event is only the short image name ("svchost.exe"),
+            // not a path. Resolve the full Win32 path from the live process; fall back to the
+            // short name only if the process has already exited.
+            string fullPath = TryGetFullImagePath(data.ProcessID) ?? data.ImageFileName ?? "";
+            _processes[data.ProcessID] = BuildContext(data.ProcessID, fullPath, data.CommandLine ?? "");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"ETW ProcessStart handling failed (PID {data.ProcessID}): {ex.Message}");
+        }
+    }
+
+    private void SeedRunningProcesses()
+    {
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcesses())
+            {
+                using (p)
+                {
+                    string? path = TryGetFullImagePath(p.Id);
+                    if (path != null)
+                        _processes.TryAdd(p.Id, BuildContext(p.Id, path, ""));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"ETW: could not seed running processes: {ex.Message}");
+        }
+    }
+
+    private static DiscoveryContext BuildContext(int pid, string binaryPath, string commandLine)
+    {
+        var ctx = new DiscoveryContext
+        {
+            Pid = pid,
+            BinaryPath = binaryPath,
+            CommandLine = commandLine,
+            TokenUser = "Unknown",
+            IntegrityLevel = "Unknown"
+        };
+
+        // Enrich with token info if possible
+        try
+        {
+            using var proc = System.Diagnostics.Process.GetProcessById(pid);
+            ctx.TokenUser = TokenHelper.GetProcessUser(proc.Handle);
+            ctx.IntegrityLevel = TokenHelper.GetProcessIntegrityLevel(proc.Handle);
+        }
+        catch
+        {
+            // Protected / exited / access denied — identity stays "Unknown" and is filled
+            // from static context data by EnrichWithStaticData where possible.
+        }
+
+        return ctx;
+    }
+
+    private static string? TryGetFullImagePath(int pid)
+    {
+        IntPtr h = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            var sb = new System.Text.StringBuilder(1024);
+            uint size = (uint)sb.Capacity;
+            return NativeMethods.QueryFullProcessImageNameW(h, 0, sb, ref size) && size > 0
+                ? sb.ToString()
+                : null;
+        }
+        finally
+        {
+            NativeMethods.CloseHandle(h);
+        }
+    }
+
+    /// <summary>
+    /// Same target semantics as static discovery: a full file path, a directory (anything
+    /// beneath it), or a bare file name / name fragment.
+    /// </summary>
+    private bool MatchesTarget(string binaryPath)
+    {
+        if (string.IsNullOrEmpty(_profile.TargetPath)) return true;
+        if (string.IsNullOrEmpty(binaryPath)) return false;
+
+        string target = Environment.ExpandEnvironmentVariables(_profile.TargetPath)
+            .Replace('/', Path.DirectorySeparatorChar)
+            .TrimEnd(Path.DirectorySeparatorChar);
+
+        if (binaryPath.Equals(target, StringComparison.OrdinalIgnoreCase)) return true;
+        if (binaryPath.StartsWith(target + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        string fileName = Path.GetFileName(binaryPath);
+        string targetName = Path.GetFileName(target);
+        return fileName.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
+               Path.GetFileNameWithoutExtension(fileName).Equals(targetName, StringComparison.OrdinalIgnoreCase);
     }
 
     private void OnImageLoad(ImageLoadTraceData data)
@@ -186,14 +267,7 @@ public class ETWDiscoveryEngine
             if (_processes.TryGetValue(data.ProcessID, out var ctx))
             {
                 // When --target is set, skip processes whose binary is not under the target.
-                if (!string.IsNullOrEmpty(_profile.TargetPath))
-                {
-                    string targetDir = _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
-                    if (!ctx.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
-                            StringComparison.OrdinalIgnoreCase) &&
-                        !ctx.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
-                        return;
-                }
+                if (!MatchesTarget(ctx.BinaryPath)) return;
 
                 ctx.LoadedDlls.Add(fileName);
 
@@ -263,14 +337,7 @@ public class ETWDiscoveryEngine
                         if (_processes.TryGetValue(data.ProcessID, out var ctx))
                         {
                             // When --target is set, skip processes not under the target.
-                            if (!string.IsNullOrEmpty(_profile.TargetPath))
-                            {
-                                string targetDir = _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
-                                if (!ctx.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
-                                        StringComparison.OrdinalIgnoreCase) &&
-                                    !ctx.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
-                                    return;
-                            }
+                            if (!MatchesTarget(ctx.BinaryPath)) return;
 
                             processPath = ctx.BinaryPath;
                             tokenUser = ctx.TokenUser;
@@ -304,17 +371,10 @@ public class ETWDiscoveryEngine
     {
         try
         {
-            string? targetDir = string.IsNullOrEmpty(_profile.TargetPath)
-                ? null
-                : _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
-
             var services = ServiceEnumerator.EnumerateServices()
                 .Where(s => s.IsAutoStart && s.StartType != "DISABLED")
-                // When --target is set, only trigger services whose binary lives under that path.
-                .Where(s => targetDir == null ||
-                            s.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
-                                StringComparison.OrdinalIgnoreCase) ||
-                            s.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
+                // When --target is set, only trigger services whose binary matches the target.
+                .Where(s => MatchesTarget(s.BinaryPath))
                 .GroupBy(s => s.TriggerIdentifier)
                 .Select(g => g.First())
                 .Take(100)
@@ -351,18 +411,12 @@ public class ETWDiscoveryEngine
     {
         try
         {
-            string? targetDir = string.IsNullOrEmpty(_profile.TargetPath)
-                ? null
-                : _profile.TargetPath.TrimEnd(Path.DirectorySeparatorChar);
-
-            var allTasks = ScheduledTaskEnumerator.EnumerateScheduledTasks();
-            // When --target is set, only trigger tasks whose binary lives under that path.
-            var tasks = targetDir == null
-                ? allTasks
-                : allTasks.Where(t =>
-                    t.BinaryPath.StartsWith(targetDir + Path.DirectorySeparatorChar,
-                        StringComparison.OrdinalIgnoreCase) ||
-                    t.BinaryPath.Equals(targetDir, StringComparison.OrdinalIgnoreCase)).ToList();
+            // When --target is set, only trigger tasks whose binary matches the target.
+            var tasks = ScheduledTaskEnumerator.EnumerateScheduledTasks()
+                .Where(t => MatchesTarget(t.BinaryPath))
+                .GroupBy(t => t.TriggerIdentifier, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
             foreach (var task in tasks.Take(30))
             {
                 try
