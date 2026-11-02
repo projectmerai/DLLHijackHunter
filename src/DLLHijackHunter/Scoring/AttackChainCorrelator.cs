@@ -8,94 +8,73 @@ public class AttackChainCorrelator
     public List<AttackChain> BuildChains(List<HijackCandidate> findings)
     {
         var chains = new List<AttackChain>();
-        string currentUser;
-        try { currentUser = WindowsIdentity.GetCurrent().Name; }
-        catch { currentUser = "Unknown"; }
 
         // 1. Categorize findings
         var uacBypasses = findings.Where(c => c.Trigger == TriggerType.UACBypass).ToList();
-        
-        var systemServices = findings.Where(c => 
-            (c.RunAsAccount.Equals("NT AUTHORITY\\SYSTEM", StringComparison.OrdinalIgnoreCase) || 
+
+        // Every finding has already passed the WritabilityFilter, which judges writability
+        // for an UNPRIVILEGED principal (AclChecker). So any SYSTEM finding — EnvPath,
+        // SearchOrder, Phantom, DotLocal — is directly plantable by a standard user.
+        var systemFindings = findings.Where(c =>
+            (c.RunAsAccount.Equals("NT AUTHORITY\\SYSTEM", StringComparison.OrdinalIgnoreCase) ||
              c.RunAsAccount.Equals("LocalSystem", StringComparison.OrdinalIgnoreCase) ||
              c.ConfirmedPrivilege?.Equals("NT AUTHORITY\\SYSTEM", StringComparison.OrdinalIgnoreCase) == true) &&
-            c.Trigger != TriggerType.UACBypass).ToList();
+            c.Trigger != TriggerType.UACBypass &&
+            !c.IsProtectedProcess).ToList();
 
-        // 2. Build "The Direct Path" (User -> SYSTEM)
-        // We do this first because if a Direct Path exists, it's the most critical
-        var directSystem = systemServices.Where(c => c.Type == HijackType.EnvPath).ToList();
-        if (directSystem.Any())
+        // 2. "The Direct Path" (User -> SYSTEM)
+        if (systemFindings.Any())
         {
-            var bestDirect = directSystem.OrderByDescending(c => c.FinalScore).First();
+            var bestDirect = systemFindings.OrderByDescending(c => c.FinalScore).First();
             chains.Add(new AttackChain
             {
                 Name = "The Direct Path (User → SYSTEM)",
-                Description = "A misconfiguration allows a standard user to hijack a SYSTEM process directly.",
+                Description = "A standard user can plant a DLL that a SYSTEM process loads.",
                 TargetPrivilege = "NT AUTHORITY\\SYSTEM",
                 Steps = new List<AttackStep>
                 {
-                    new() { StepNumber = 1, Action = $"Start as Standard User ({currentUser})", Details = "" },
+                    new() { StepNumber = 1, Action = "Start as Standard User", Details = "No administrative rights required." },
                     new() { StepNumber = 2, Action = $"Plant malicious {bestDirect.DllName}", Details = $"Write payload to: {bestDirect.HijackWritablePath}", Finding = bestDirect },
-                    new() { StepNumber = 3, Action = $"Trigger: {bestDirect.TriggerIdentifier}", Details = bestDirect.SurvivesReboot ? "Wait for reboot." : "Execute trigger." },
+                    new() { StepNumber = 3, Action = $"Trigger: {bestDirect.TriggerIdentifier}", Details = bestDirect.SurvivesReboot ? "Wait for reboot or service start." : "Execute trigger." },
                     new() { StepNumber = 4, Action = "💥 SYSTEM Shell Achieved!", Details = "Bypassed Admin entirely." }
                 }
             });
         }
 
-        // 3. Build "The Ladder" (User -> Admin -> SYSTEM)
-        // Only use SYSTEM services that are NOT already in the direct path (i.e. require Admin to write to)
-        var ladderSystemServices = systemServices.Except(directSystem).ToList();
-        
-        if (uacBypasses.Any() && ladderSystemServices.Any())
+        // 3. "The Ladder" (User -> Admin -> SYSTEM): only meaningful when there is NO direct
+        //    SYSTEM hijack. A silent UAC bypass yields a High-Integrity admin token, from which
+        //    SYSTEM is a standard administrative step — not dependent on another finding.
+        if (uacBypasses.Any() && !systemFindings.Any())
         {
             var bestUac = uacBypasses.OrderByDescending(c => c.FinalScore).First();
-            var bestSystem = ladderSystemServices.OrderByDescending(c => c.FinalScore).First();
 
-            var chain = new AttackChain
+            chains.Add(new AttackChain
             {
                 Name = "The Ladder (User → Admin → SYSTEM)",
-                Description = "Chains a silent UAC bypass to gain write access, followed by a SYSTEM service hijack.",
+                Description = "Chains a silent UAC bypass (as a member of Administrators running at " +
+                              "medium integrity) into a High-Integrity token, then SYSTEM.",
                 TargetPrivilege = "NT AUTHORITY\\SYSTEM",
                 Steps = new List<AttackStep>
                 {
-                    new() { 
-                        StepNumber = 1, 
-                        Action = $"Start as Standard User ({currentUser})", 
-                        Details = "Initial foothold." 
-                    },
-                    new() { 
-                        StepNumber = 2, 
-                        Action = $"Execute Silent UAC Bypass via {bestUac.DllName}", 
+                    new() { StepNumber = 1, Action = "Start as a filtered-token admin (medium integrity)", Details = "UAC bypass requires the user to be in Administrators." },
+                    new()
+                    {
+                        StepNumber = 2,
+                        Action = $"Execute Silent UAC Bypass via {bestUac.DllName}",
                         Details = $"Copy {Path.GetFileName(bestUac.BinaryPath)} to writable folder, drop DLL, and execute.",
                         Finding = bestUac
                     },
-                    new() { 
-                        StepNumber = 3, 
-                        Action = "Achieve High Integrity (Local Admin)", 
-                        Details = "You now have permissions to write to protected locations." 
-                    },
-                    new() { 
-                        StepNumber = 4, 
-                        Action = $"Plant malicious {bestSystem.DllName}", 
-                        Details = $"Write payload to: {bestSystem.HijackWritablePath}",
-                        Finding = bestSystem
-                    },
-                    new() { 
-                        StepNumber = 5, 
-                        Action = $"Trigger: {bestSystem.TriggerIdentifier}", 
-                        Details = bestSystem.SurvivesReboot ? "Wait for reboot or restart service." : "Execute trigger."
-                    },
-                    new() { 
-                        StepNumber = 6, 
-                        Action = "💥 SYSTEM Shell Achieved!", 
-                        Details = "Full machine compromise." 
-                    }
+                    new() { StepNumber = 3, Action = "Achieve High Integrity (Local Admin)", Details = "Full administrative token without a consent prompt." },
+                    new() { StepNumber = 4, Action = "💥 Escalate to SYSTEM", Details = "Standard admin → SYSTEM step (e.g. create/modify a service)." }
                 }
-            };
-            chains.Add(chain);
+            });
         }
 
         // 4. Build "Persistence" Chain (Initial Compromise -> AutoStart)
+        string currentUser;
+        try { currentUser = WindowsIdentity.GetCurrent().Name; }
+        catch { currentUser = "Unknown"; }
+
         var persistanceFindings = findings.Where(c => c.SurvivesReboot && c.Trigger != TriggerType.Service).ToList();
         
         if (persistanceFindings.Any())
