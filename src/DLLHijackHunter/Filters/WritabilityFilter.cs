@@ -61,7 +61,7 @@ public class WritabilityFilter : IHardGate
             {
                 string? dotLocalParent = Path.GetDirectoryName(Path.GetDirectoryName(targetPath));
                 writable = dotLocalParent != null &&
-                    AclChecker.IsDirectoryWritableByStandardUser(dotLocalParent, c.RunAsAccount);
+                    AclChecker.CanCreateSubdirectory(dotLocalParent, c.RunAsAccount);
             }
             else
             {
