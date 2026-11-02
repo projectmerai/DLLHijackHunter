@@ -24,7 +24,7 @@ public class CanaryEngine
 
         AnsiConsole.MarkupLine($"\n[bold cyan]═══ Canary Confirmation ({candidates.Count} candidates) ═══[/]");
 
-        int confirmed = 0, failed = 0, skipped = 0;
+        int confirmed = 0, failed = 0, skipped = 0, blocked = 0;
 
         await AnsiConsole.Progress()
             .StartAsync(async ctx =>
@@ -57,8 +57,16 @@ public class CanaryEngine
                         await TestCandidate(candidate);
                         if (candidate.CanaryResult == CanaryResult.Fired)
                             confirmed++;
+                        else if (candidate.CanaryResult == CanaryResult.Blocked)
+                            blocked++;
                         else
                             failed++;
+                    }
+                    catch (IOException ex) when ((ex.HResult & 0xFFFF) == 225) // ERROR_VIRUS_INFECTED
+                    {
+                        candidate.CanaryResult = CanaryResult.Blocked;
+                        candidate.Notes.Add($"Canary blocked by antivirus while deploying: {ex.Message}");
+                        blocked++;
                     }
                     catch (Exception ex)
                     {
@@ -70,7 +78,11 @@ public class CanaryEngine
             });
 
         AnsiConsole.MarkupLine($"  [green]Confirmed: {confirmed}[/] | " +
-            $"[red]Failed: {failed}[/] | [yellow]Skipped: {skipped}[/]");
+            $"[red]Failed: {failed}[/] | [yellow]Skipped: {skipped}[/]" +
+            (blocked > 0 ? $" | [yellow]AV-blocked: {blocked}[/]" : ""));
+        if (blocked > 0)
+            AnsiConsole.MarkupLine("  [yellow]⚠ Antivirus removed the canary for some candidates — those results are " +
+                "inconclusive. Exclude the target directories and %ProgramData%\\DLLHijackHunter on a test machine.[/]");
         ScanLogger.Debug($"Canary results: {confirmed} confirmed, {failed} failed, {skipped} skipped");
 
         // Cleanup all canary artifacts
@@ -310,7 +322,16 @@ public class CanaryEngine
                         }
                     }
 
-                    if (candidate.CanaryResult != CanaryResult.Fired)
+                    if (candidate.CanaryResult != CanaryResult.Fired && !File.Exists(candidate.HijackWritablePath))
+                    {
+                        // The canary vanished from the deploy location: real-time antivirus
+                        // quarantined it. That says nothing about the hijack itself.
+                        candidate.CanaryResult = CanaryResult.Blocked;
+                        candidate.Notes.Add("Canary DLL was removed from the deploy location before it fired — " +
+                            "most likely quarantined by antivirus. Inconclusive; exclude the directory on a " +
+                            "test machine to confirm.");
+                    }
+                    else if (candidate.CanaryResult != CanaryResult.Fired)
                     {
                         candidate.CanaryResult = CanaryResult.Timeout;
                         candidate.Notes.Add(
