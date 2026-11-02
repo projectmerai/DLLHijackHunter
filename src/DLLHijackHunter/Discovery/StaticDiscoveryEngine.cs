@@ -12,8 +12,6 @@ public class StaticDiscoveryEngine
     private readonly ScanProfile _profile;
 
     private static readonly Lazy<HashSet<string>> PhantomDllDatabase = new(LoadPhantomDlls);
-    private static readonly Lazy<HashSet<string>> KnownDllsCache = new(() =>
-        Filters.KnownDllsFilter.LoadKnownDlls(@"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs"));
 
     // Lazily-built set of all directories listed in %PATH% (case-insensitive on Windows).
     // Used to reclassify hijack candidates whose writable position is in a PATH directory
@@ -371,7 +369,7 @@ public class StaticDiscoveryEngine
 
         if (dotLocalHonoured &&
             dotLocalParent != null &&
-            AclChecker.IsDirectoryWritableByStandardUser(dotLocalParent, bestAccount) &&
+            AclChecker.CanCreateSubdirectory(dotLocalParent, bestAccount) &&
             !Directory.Exists(dotLocalDir))
         {
             var bestCtx = contexts.OrderByDescending(c => GetContextPriority(c)).First();
@@ -411,7 +409,7 @@ public class StaticDiscoveryEngine
             c.TriggerType == TriggerType.UACBypass &&
             c.TriggerIdentifier == "Manifest AutoElevate (Heuristic)" &&
             binaryPath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
-        bool isSideloadBlocked = KnownDllsCache.Value.Contains(dllName.ToLowerInvariant()) ||
+        bool isSideloadBlocked = Filters.KnownDllsFilter.IsKnownDll(dllName) ||
             File.Exists(Path.Combine(Environment.SystemDirectory, dllName));
         if (uacCtx != null && !isSideloadBlocked &&
             !peResult.CallsSetDllDirectory && !peResult.CallsSetDefaultDllDirectories)
