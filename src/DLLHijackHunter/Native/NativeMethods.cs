@@ -52,6 +52,45 @@ public static class NativeMethods
     public static extern IntPtr OpenProcess(uint dwDesiredAccess,
         [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, int dwProcessId);
 
+    // ─── Ntdll: object directory enumeration (\KnownDlls) ───
+    public const uint DIRECTORY_QUERY = 0x0001;
+    public const int STATUS_SUCCESS = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct UNICODE_STRING
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public IntPtr Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct OBJECT_ATTRIBUTES
+    {
+        public int Length;
+        public IntPtr RootDirectory;
+        public IntPtr ObjectName;          // PUNICODE_STRING
+        public uint Attributes;
+        public IntPtr SecurityDescriptor;
+        public IntPtr SecurityQualityOfService;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct OBJECT_DIRECTORY_INFORMATION
+    {
+        public UNICODE_STRING Name;
+        public UNICODE_STRING TypeName;
+    }
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtOpenDirectoryObject(out IntPtr DirectoryHandle, uint DesiredAccess,
+        ref OBJECT_ATTRIBUTES ObjectAttributes);
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtQueryDirectoryObject(IntPtr DirectoryHandle, IntPtr Buffer, int Length,
+        [MarshalAs(UnmanagedType.U1)] bool ReturnSingleEntry, [MarshalAs(UnmanagedType.U1)] bool RestartScan,
+        ref uint Context, out uint ReturnLength);
+
     // ─── Advapi32 ───
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

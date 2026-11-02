@@ -62,7 +62,9 @@ public static class LoadProbe
             IntPtr h = LoadLibraryW(dllName);
             if (h == IntPtr.Zero)
             {
-                Console.Out.Write("NOTRESOLVED");
+                // Report WHY the load failed (e.g. 225 = blocked by AV/Defender,
+                // 577/1260 = code-integrity / application-control policy, 126 = not found).
+                Console.Out.Write("NOTRESOLVED:" + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
                 return 0;
             }
 
@@ -116,7 +118,9 @@ public static class LoadProbe
             }
             if (h == IntPtr.Zero)
             {
-                Console.Out.Write("NOTRESOLVED");
+                // Report WHY the load failed (e.g. 225 = blocked by AV/Defender,
+                // 577/1260 = code-integrity / application-control policy, 126 = not found).
+                Console.Out.Write("NOTRESOLVED:" + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
                 return 0;
             }
 
@@ -249,7 +253,10 @@ public static class LoadProbe
             else
             {
                 c.LoadProbe = LoadProbeResult.NotResolved;
-                c.Notes.Add("Load-order probe: the name did not resolve even with a probe placed.");
+                string detail = DescribeLoadFailure(output);
+                c.Notes.Add("Load-order probe: the name did not resolve even with a probe placed" +
+                    (detail.Length > 0 ? $" ({detail})." : "."));
+                ScanLogger.Debug($"Load probe NotResolved for {target} [{mode}]: {output}");
             }
         }
         catch (Exception ex)
@@ -293,20 +300,42 @@ public static class LoadProbe
             if (mode != "modern") psi.ArgumentList.Add(mode);
 
             using var p = Process.Start(psi);
-            if (p == null) return "NOTRESOLVED";
+            if (p == null) return "NOTRESOLVED:child-not-started";
 
             string output = p.StandardOutput.ReadToEnd();
             if (!p.WaitForExit(Math.Max(1, timeoutSec) * 1000))
             {
                 try { p.Kill(entireProcessTree: true); } catch { }
-                return "NOTRESOLVED";
+                return "NOTRESOLVED:timeout";
             }
             return output.Trim();
         }
-        catch
+        catch (Exception ex)
         {
-            return "NOTRESOLVED";
+            return "NOTRESOLVED:child-error " + ex.Message;
         }
+    }
+
+    private static string DescribeLoadFailure(string output)
+    {
+        int colon = output.IndexOf(':');
+        if (colon < 0) return "";
+        string tail = output[(colon + 1)..].Trim();
+        if (!int.TryParse(tail, out int err))
+            return tail;                                   // timeout / child-error text
+        if (err == 0) return "";
+
+        string meaning = err switch
+        {
+            2 or 126 => "module not found",
+            5 => "access denied",
+            193 => "not a valid image for this architecture",
+            225 => "blocked by antivirus — the probe DLL was flagged",
+            577 or 1260 or 4551 => "blocked by code-integrity / application-control policy",
+            1114 => "DllMain initialisation failed",
+            _ => new System.ComponentModel.Win32Exception(err).Message
+        };
+        return $"loader error {err}: {meaning}";
     }
 
     private static bool PathsEqual(string a, string b)

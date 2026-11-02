@@ -27,10 +27,19 @@ public static class AclChecker
     // Directory access rights that let an attacker drop or replace a DLL.
     private const uint FILE_ADD_FILE         = 0x0002; // create a new file in the directory
     private const uint FILE_ADD_SUBDIRECTORY = 0x0004; // create a subdirectory (e.g. <bin>.local)
+    private const uint WRITE_DAC             = 0x00040000; // can rewrite the ACL → grant itself anything
+    private const uint WRITE_OWNER           = 0x00080000; // can take ownership → then rewrite the ACL
     private const uint GENERIC_WRITE         = 0x40000000;
     private const uint GENERIC_ALL           = 0x10000000;
-    private const uint WRITE_MASK =
-        FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | GENERIC_WRITE | GENERIC_ALL;
+    private const uint CONTROL_MASK = WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+
+    // Dropping a DLL needs FILE_ADD_FILE. FILE_ADD_SUBDIRECTORY alone is NOT enough: e.g. the
+    // C:\ root grants Authenticated Users "create folders" but not "create files", and
+    // counting it made every drive-root position look writable.
+    private const uint FILE_DROP_MASK = FILE_ADD_FILE | CONTROL_MASK;
+
+    // Creating a directory (an <exe>.local folder, or a missing parent) needs FILE_ADD_SUBDIRECTORY.
+    private const uint SUBDIR_CREATE_MASK = FILE_ADD_SUBDIRECTORY | CONTROL_MASK;
 
     private const uint ERROR_SUCCESS = 0;
 
@@ -53,15 +62,25 @@ public static class AclChecker
     /// Optionally also evaluates a (non-privileged) service RunAsAccount.
     /// </summary>
     public static bool IsDirectoryWritableByStandardUser(string path, string? alsoEvaluateAccount = null)
+        => HasDirectoryRight(path, alsoEvaluateAccount, FILE_DROP_MASK);
+
+    /// <summary>
+    /// True if an unprivileged attacker could create a SUBDIRECTORY in this directory
+    /// (e.g. the <c>&lt;exe&gt;.local</c> folder next to a binary).
+    /// </summary>
+    public static bool CanCreateSubdirectory(string path, string? alsoEvaluateAccount = null)
+        => HasDirectoryRight(path, alsoEvaluateAccount, SUBDIR_CREATE_MASK);
+
+    private static bool HasDirectoryRight(string path, string? alsoEvaluateAccount, uint mask)
     {
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
             return false;
 
-        string key = path.ToLowerInvariant() + "|" + (alsoEvaluateAccount ?? "");
+        string key = path.ToLowerInvariant() + "|" + (alsoEvaluateAccount ?? "") + "|" + mask.ToString("x");
         if (_cache.TryGetValue(key, out bool cached))
             return cached;
 
-        bool result = EvaluateWritable(path, BuildPrincipals(alsoEvaluateAccount));
+        bool result = EvaluateWritable(path, BuildPrincipals(alsoEvaluateAccount), mask);
         _cache[key] = result;
         return result;
     }
@@ -76,7 +95,7 @@ public static class AclChecker
         string? parent = Path.GetDirectoryName(path);
         if (string.IsNullOrEmpty(parent)) return false;
 
-        return IsDirectoryWritableByStandardUser(parent, alsoEvaluateAccount);
+        return CanCreateSubdirectory(parent, alsoEvaluateAccount);
     }
 
     /// <summary>
@@ -127,7 +146,7 @@ public static class AclChecker
         };
     }
 
-    private static bool EvaluateWritable(string path, List<SecurityIdentifier> principals)
+    private static bool EvaluateWritable(string path, List<SecurityIdentifier> principals, uint mask)
     {
         IntPtr pSecurityDescriptor = IntPtr.Zero;
         try
@@ -147,7 +166,7 @@ public static class AclChecker
 
             foreach (var sid in principals)
             {
-                if (TrusteeHasWrite(pDacl, sid))
+                if (TrusteeHasRight(pDacl, sid, mask))
                     return true;
             }
 
@@ -164,7 +183,7 @@ public static class AclChecker
         }
     }
 
-    private static bool TrusteeHasWrite(IntPtr pDacl, SecurityIdentifier sid)
+    private static bool TrusteeHasRight(IntPtr pDacl, SecurityIdentifier sid, uint mask)
     {
         IntPtr pSid = IntPtr.Zero;
         try
@@ -181,7 +200,7 @@ public static class AclChecker
             if (err != ERROR_SUCCESS)
                 return false;
 
-            return (accessRights & WRITE_MASK) != 0;
+            return (accessRights & mask) != 0;
         }
         catch
         {
