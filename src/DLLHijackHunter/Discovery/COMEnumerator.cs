@@ -25,10 +25,17 @@ public static class COMEnumerator
                     // Check LocalServer32 (EXE-based COM objects)
                     EnumerateComServer(clsidKey, clsid, "LocalServer32", seen, results);
                 }
-                catch { continue; }
+                catch (Exception ex)
+                {
+                    ScanLogger.Debug($"COM enumeration failed for {clsid}: {ex.Message}");
+                    continue;
+                }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"COM enumeration failed: {ex.Message}");
+        }
 
         return results;
     }

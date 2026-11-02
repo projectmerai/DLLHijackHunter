@@ -13,7 +13,7 @@ namespace DLLHijackHunter.Native;
 /// Instead it answers "can an UNPRIVILEGED principal write here?".
 ///
 /// Effective rights are computed against the well-known low-privilege SIDs
-/// Users (S-1-5-32-545), Authenticated Users (S-1-5-11) and Everyone (S-1-1-0)
+/// Users (S-1-5-32-545), Authenticated Users (S-1-5-11), Everyone (S-1-1-0) and INTERACTIVE (S-1-5-4)
 /// using GetNamedSecurityInfo + GetEffectiveRightsFromAcl + BuildTrusteeWithSid,
 /// completely independent of the current process token's group membership.
 ///
@@ -40,6 +40,7 @@ public static class AclChecker
         new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),      // S-1-5-32-545
         new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null), // S-1-5-11
         new SecurityIdentifier(WellKnownSidType.WorldSid, null),             // S-1-1-0 (Everyone)
+        new SecurityIdentifier(WellKnownSidType.InteractiveSid, null),       // S-1-5-4 (INTERACTIVE — every console/RDP logon)
     };
 
     // Directory ACLs do not change during a scan, and the same directories

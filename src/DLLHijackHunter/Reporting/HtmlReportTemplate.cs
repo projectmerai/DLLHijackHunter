@@ -36,6 +36,16 @@ public static class HtmlReportTemplate
   .finding-header.high { background: rgba(210, 153, 34, 0.1); border-bottom: 2px solid #d29922; }
   .finding-header.medium { background: rgba(227, 179, 65, 0.1); border-bottom: 2px solid #e3b341; }
   .finding-header.low { background: rgba(139, 148, 158, 0.1); border-bottom: 2px solid #8b949e; }
+  .finding-header.informational { background: rgba(110, 118, 129, 0.08); border-bottom: 2px solid #6e7681; }
+  .badge-informational { background: #6e7681; color: white; }
+  .chain { background: #161b22; border: 1px solid #30363d; border-left: 4px solid #f85149; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1rem; }
+  .chain h3 { color: #58a6ff; margin-bottom: 0.25rem; }
+  .chain p { color: #8b949e; margin-bottom: 0.75rem; }
+  .chain ol { padding-left: 1.5rem; }
+  .chain li { margin-bottom: 0.4rem; }
+  .chain .details { color: #8b949e; font-size: 0.9rem; display: block; }
+  h2.section { color: #c9d1d9; margin: 2rem 0 1rem; }
+  .footer { text-align: center; color: #8b949e; margin-top: 2rem; font-size: 0.85rem; }
   .finding-body { padding: 1.5rem; }
   .finding-body .row { display: grid; grid-template-columns: 140px 1fr; margin-bottom: 0.5rem; }
   .finding-body .label { color: #8b949e; font-weight: 600; }
@@ -61,7 +71,7 @@ public static class HtmlReportTemplate
         sb.AppendLine($@"
 <div class=""summary"">
   <div class=""summary-card"">
-    <div class=""value"">{result.Hostname}</div>
+    <div class=""value"">{Enc(result.Hostname)}</div>
     <div class=""label"">Hostname</div>
   </div>
   <div class=""summary-card"">
@@ -84,7 +94,36 @@ public static class HtmlReportTemplate
     <div class=""value"">{result.Low.Count}</div>
     <div class=""label"">Low</div>
   </div>
+  <div class=""summary-card"">
+    <div class=""value"">{result.Informational.Count}</div>
+    <div class=""label"">Informational</div>
+  </div>
+  <div class=""summary-card"">
+    <div class=""value"" style=""font-size:1rem"">{Enc(result.ScanMode)}</div>
+    <div class=""label"">Scan Mode ({Enc(result.ProfileUsed)})</div>
+  </div>
 </div>");
+
+        // Attack chains
+        if (result.AttackChains.Any())
+        {
+            sb.AppendLine(@"<h2 class=""section"">⛓ Attack Chains</h2>");
+            foreach (var chain in result.AttackChains)
+            {
+                sb.AppendLine($@"<div class=""chain""><h3>{Enc(chain.Name)}</h3><p>{Enc(chain.Description)}</p><ol>");
+                foreach (var step in chain.Steps)
+                {
+                    sb.Append($"<li>{Enc(step.Action)}");
+                    if (!string.IsNullOrEmpty(step.Details))
+                        sb.Append($@"<span class=""details"">{Enc(step.Details)}</span>");
+                    sb.AppendLine("</li>");
+                }
+                sb.AppendLine("</ol></div>");
+            }
+        }
+
+        if (result.AllFindings.Any())
+            sb.AppendLine(@"<h2 class=""section"">Findings</h2>");
 
         // Findings
         int rank = 0;
@@ -113,10 +152,18 @@ public static class HtmlReportTemplate
     <div class=""row""><span class=""label"">Confidence</span><span>{f.Confidence:F0}%</span></div>
     <div class=""row""><span class=""label"">Impact</span><span>{f.ImpactScore:F1}</span></div>
     <div class=""row""><span class=""label"">Canary</span><span>{f.CanaryResult}" +
-    (f.CanaryResult == CanaryResult.Fired ? $" ✓ ({Enc(f.ConfirmedPrivilege ?? "")} / {f.ConfirmedIntegrityLevel})" : "") +
+    (f.CanaryResult == CanaryResult.Fired ? $" ✓ ({Enc(f.ConfirmedPrivilege ?? "")} / {Enc(f.ConfirmedIntegrityLevel ?? "")})" : "") +
     $@"</span></div>
     <div class=""row""><span class=""label"">Survives Reboot</span><span>{(f.SurvivesReboot ? "✓ Yes" : "No")}</span></div>
-    <div class=""row""><span class=""label"">Use Cases</span><span>{(f.UseCases.Any() ? string.Join(", ", f.UseCases) : "General")}</span></div>");
+    <div class=""row""><span class=""label"">Use Cases</span><span>{Enc(f.UseCases.Any() ? string.Join(", ", f.UseCases) : "General")}</span></div>
+    <div class=""row""><span class=""label"">Source</span><span>{Enc(f.DiscoverySource)}</span></div>");
+
+            if (f.LoadProbe != LoadProbeResult.NotRun)
+                sb.AppendLine($@"    <div class=""row""><span class=""label"">Load Probe</span><span>{f.LoadProbe}" +
+                    (f.LoadProbeResolvedPath != null ? $" ({Enc(f.LoadProbeResolvedPath)})" : "") + "</span></div>");
+
+            if (!string.IsNullOrEmpty(f.KnowledgeBaseReference))
+                sb.AppendLine($@"    <div class=""row""><span class=""label"">Reference</span><span>{Enc(f.KnowledgeBaseReference)}</span></div>");
 
             if (f.Notes.Any())
             {

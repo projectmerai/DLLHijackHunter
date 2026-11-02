@@ -82,11 +82,13 @@ public class TieredScorer
         c.FinalScore = Math.Round(Math.Clamp(c.FinalScore, 0, 10), 1);
 
         // ═══ Add use cases if not already present ═══
-        if (c.Trigger == TriggerType.UACBypass && !c.UseCases.Contains("Silent UAC Bypass"))
-            c.UseCases.Add("Silent UAC Bypass (Admin execution without prompt)");
+        const string UacUseCase = "Silent UAC Bypass (Admin execution without prompt)";
+        if (c.Trigger == TriggerType.UACBypass && !c.UseCases.Contains(UacUseCase))
+            c.UseCases.Add(UacUseCase);
 
-        if (c.IsSimulatedCopyAttack && !c.UseCases.Contains("Copy & Side-Load"))
-            c.UseCases.Add("Copy & Side-Load (Copy EXE to writable folder, drop DLL next to it)");
+        const string SideLoadUseCase = "Copy & Side-Load (Copy EXE to writable folder, drop DLL next to it)";
+        if (c.IsSimulatedCopyAttack && !c.UseCases.Contains(SideLoadUseCase))
+            c.UseCases.Add(SideLoadUseCase);
             
         if (c.SurvivesReboot && !c.UseCases.Contains("Persistence"))
             c.UseCases.Add("Persistence");
