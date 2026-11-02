@@ -159,7 +159,7 @@ public static class LoadProbe
         AnsiConsole.MarkupLine("[dim]Each candidate's writable position is briefly written with a " +
             "benign probe DLL, resolved by the real loader, then restored.[/]");
 
-        int wins = 0, loses = 0, inconclusive = 0, skipped = 0;
+        int wins = 0, loses = 0, inconclusive = 0, skipped = 0, avBlocked = 0;
 
         AnsiConsole.Progress().Start(ctx =>
         {
@@ -169,7 +169,7 @@ public static class LoadProbe
                 if (cancellationToken.IsCancellationRequested) break;
                 task.Increment(1);
 
-                Probe(c, probeDll, selfExe!, profile.LoadProbeTimeoutSeconds);
+                if (Probe(c, probeDll, selfExe!, profile.LoadProbeTimeoutSeconds)) avBlocked++;
                 switch (c.LoadProbe)
                 {
                     case LoadProbeResult.Wins: wins++; break;
@@ -183,10 +183,18 @@ public static class LoadProbe
         AnsiConsole.MarkupLine($"  [green]Verified-win: {wins}[/] | " +
             $"[red]Loses to protected (likely FP): {loses}[/] | " +
             $"[yellow]Inconclusive: {inconclusive}[/] | [grey]Skipped: {skipped}[/]");
-        ScanLogger.Debug($"Load probe: {wins} win, {loses} lose, {inconclusive} inconclusive, {skipped} skipped");
+        ScanLogger.Debug($"Load probe: {wins} win, {loses} lose, {inconclusive} inconclusive, {skipped} skipped, {avBlocked} AV-blocked");
+
+        if (avBlocked > 0)
+        {
+            AnsiConsole.MarkupLine($"  [yellow]⚠ {avBlocked} probe(s) were removed right after placement — most likely " +
+                "quarantined by antivirus. Those results are inconclusive, not 'not hijackable'. To verify them, " +
+                "exclude the target directories and %ProgramData%\\DLLHijackHunter on a test machine.[/]");
+        }
     }
 
-    private static void Probe(HijackCandidate c, string probeDll, string selfExe, int timeoutSec)
+    /// <returns>true when the probe DLL was removed after placement (antivirus quarantine).</returns>
+    private static bool Probe(HijackCandidate c, string probeDll, string selfExe, int timeoutSec)
     {
         // Only types whose precedence over System32 is faithfully modeled by adding the writable
         // directory as a user search dir.
@@ -194,7 +202,7 @@ public static class LoadProbe
         {
             c.LoadProbe = LoadProbeResult.Skipped;
             c.Notes.Add($"Load probe skipped: {c.Type} precedence is not faithfully modeled by the probe.");
-            return;
+            return false;
         }
 
         string target = c.HijackWritablePath;
@@ -204,7 +212,7 @@ public static class LoadProbe
         {
             c.LoadProbe = LoadProbeResult.Skipped;
             c.Notes.Add("Load probe skipped: writable directory does not exist.");
-            return;
+            return false;
         }
 
         string? backup = null;
@@ -232,6 +240,20 @@ public static class LoadProbe
                 ? "appdir"
                 : c.Trigger == TriggerType.Service ? "traditional" : "modern";
             string output = RunResolveChild(selfExe, dir!, dll, timeoutSec, mode);
+
+            // If the probe is gone, something deleted it between placement and load — in
+            // practice real-time antivirus quarantining the unsigned DLL (and often killing
+            // the loading child, which then prints nothing). The loader then falls back to the
+            // system copy or fails, so neither LosesToProtected nor NotResolved would be true.
+            if (!File.Exists(target))
+            {
+                placed = false;
+                c.LoadProbe = LoadProbeResult.Error;
+                c.Notes.Add("Load-order probe blocked: the probe DLL was removed right after placement — " +
+                    "most likely quarantined by antivirus. Inconclusive (not evidence against the hijack).");
+                ScanLogger.Debug($"Load probe AV-blocked for {target} [{mode}]: {output}");
+                return true;
+            }
 
             if (output.StartsWith("RESOLVED=", StringComparison.Ordinal))
             {
@@ -279,6 +301,8 @@ public static class LoadProbe
             // The probe is the canary build; loading it in the child writes a confirm file. Clean it.
             try { File.Delete(CanaryDllBuilder.GetConfirmPath(target)); } catch { }
         }
+
+        return false;
     }
 
     private static string RunResolveChild(string selfExe, string dir, string dll,
@@ -308,7 +332,10 @@ public static class LoadProbe
                 try { p.Kill(entireProcessTree: true); } catch { }
                 return "NOTRESOLVED:timeout";
             }
-            return output.Trim();
+            output = output.Trim();
+            if (output.Length == 0)
+                return $"NOTRESOLVED:child exited with code 0x{p.ExitCode:X8} and no output (terminated?)";
+            return output;
         }
         catch (Exception ex)
         {
