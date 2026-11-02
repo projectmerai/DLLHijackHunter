@@ -46,7 +46,28 @@ public class Program
 
         TaskScheduler.UnobservedTaskException += (sender, e) =>
         {
+            // Prevent the process from being torn down, but never swallow silently:
+            // a faulted background task (ETW processing, trigger helpers) can mean an
+            // incomplete scan, so record it and tell the operator.
             e.SetObserved();
+
+            string message = e.Exception?.GetBaseException().Message ?? "Unknown error";
+            try
+            {
+                ScanLogger.Debug($"Unobserved task exception: {e.Exception}");
+            }
+            catch { /* logger unavailable — still try the console below */ }
+
+            try
+            {
+                AnsiConsole.MarkupLine($"[yellow]⚠ Background task failed: {Markup.Escape(message)} " +
+                    "(results may be incomplete)[/]");
+            }
+            catch
+            {
+                // Console may be unavailable (this handler runs on the finalizer thread).
+                try { Console.Error.WriteLine($"Background task failed: {message}"); } catch { }
+            }
         };
 
         var rootCommand = new RootCommand("DLLHijackHunter — Automated DLL Hijacking Detection")
@@ -219,6 +240,26 @@ public class Program
         if (!string.IsNullOrEmpty(target))
         {
             profile.TargetPath = target;
+        }
+
+        // ─── Confirmed-only guard ───
+        // Confirmed-only keeps ONLY canary-fired findings. Without a canary run every
+        // candidate stays NotTested, so the report would read "Findings: 0" — a silent,
+        // false all-clear. Fail fast instead (exit code 3 = mode cannot be honoured).
+        if (profile.ConfirmedOnly && (!isElevated || !profile.RunCanary))
+        {
+            string why = !isElevated
+                ? "canary confirmation requires an elevated (Administrator) session"
+                : "canary confirmation is disabled (--no-canary or profile setting)";
+            AnsiConsole.MarkupLine($"[red]✗ Confirmed-only mode cannot run: {why}.[/]");
+            AnsiConsole.MarkupLine("[red]  Every finding would be dropped as 'not confirmed', producing a " +
+                "false all-clear.[/]");
+            AnsiConsole.MarkupLine("[dim]  Re-run elevated with canary enabled, or drop --confirmed-only " +
+                "(the 'redteam' profile enables it implicitly).[/]");
+            ScanLogger.Error($"Confirmed-only mode aborted: {why}");
+            ScanLogger.Dispose();
+            Environment.Exit(3);
+            return;
         }
 
         AnsiConsole.MarkupLine($"[bold]Profile:[/] {profile.Name}");
@@ -421,21 +462,61 @@ public class Program
         string effectiveFormat = format;
         if (outputPath != null) effectiveFormat = Path.GetExtension(outputPath).ToLowerInvariant() switch { ".json" => "json", ".html" or ".htm" => "html", _ => format };
 
-        if (effectiveFormat == "json") 
-            await ReportGenerator.GenerateJsonReport(scanResult, outputPath ?? $"hijackhunter_{DateTime.Now:yyyyMMdd_HHmmss}.json");
-        else if (effectiveFormat == "html") 
-            await ReportGenerator.GenerateHtmlReport(scanResult, outputPath ?? $"hijackhunter_{DateTime.Now:yyyyMMdd_HHmmss}.html");
+        // Each formatter is isolated: a failure in one (file I/O, serialization, markup in a
+        // path) must not take down the others or the final scan summary printed by RunScan.
+        if (effectiveFormat == "json")
+        {
+            await RunFormatterAsync("JSON report", () =>
+                ReportGenerator.GenerateJsonReport(scanResult, outputPath ?? $"hijackhunter_{DateTime.Now:yyyyMMdd_HHmmss}.json"));
+        }
+        else if (effectiveFormat == "html")
+        {
+            await RunFormatterAsync("HTML report", () =>
+                ReportGenerator.GenerateHtmlReport(scanResult, outputPath ?? $"hijackhunter_{DateTime.Now:yyyyMMdd_HHmmss}.html"));
+        }
         else
         {
             // 1. Generate normal report
-            ReportGenerator.GenerateConsoleReport(scanResult);
-            
-            // 2. ═══ RENDER ATTACK CHAINS ═══
-            ReportGenerator.RenderAttackChains(scanResult.AttackChains);
+            await RunFormatterAsync("Console report", () =>
+            {
+                ReportGenerator.GenerateConsoleReport(scanResult);
+                return Task.CompletedTask;
+            });
 
-            // 3. Save JSON backup
-            if (scanResult.TotalFindings > 0) 
-                await ReportGenerator.GenerateJsonReport(scanResult, $"hijackhunter_{DateTime.Now:yyyyMMdd_HHmmss}.json");
+            // 2. ═══ RENDER ATTACK CHAINS ═══
+            await RunFormatterAsync("Attack chain rendering", () =>
+            {
+                ReportGenerator.RenderAttackChains(scanResult.AttackChains);
+                return Task.CompletedTask;
+            });
+
+            // 3. Save JSON copy — only when the user explicitly asked for a file via --output
+            //    (a console run must not silently drop files into the working directory).
+            if (scanResult.TotalFindings > 0 && outputPath != null)
+            {
+                await RunFormatterAsync("JSON report", () =>
+                    ReportGenerator.GenerateJsonReport(scanResult, outputPath));
+            }
+        }
+    }
+
+    private static async Task RunFormatterAsync(string name, Func<Task> formatter)
+    {
+        try
+        {
+            await formatter();
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                AnsiConsole.MarkupLine($"[red]✗ {Markup.Escape(name)} failed: {Markup.Escape(ex.Message)}[/]");
+            }
+            catch
+            {
+                Console.Error.WriteLine($"{name} failed: {ex.Message}");
+            }
+            ScanLogger.Debug($"{name} failed: {ex}");
         }
     }
 }
