@@ -29,18 +29,25 @@ public class KnownDllsFilter : IHardGate
         {
             string dll = c.DllName.ToLowerInvariant();
 
+            // Check both native and WoW64 KnownDLLs
+            bool isKnownDll = _knownDlls.Contains(dll) || _knownDlls32.Contains(dll);
+
             // .local redirection does NOT bypass KnownDLLs on Windows Vista+.
             // KnownDLLs are served from the kernel object store (\KnownDlls\) and are
-            // immune to .local files on modern Windows. Suppress these as false positives.
+            // immune to .local files on modern Windows. Suppress only those as false
+            // positives; .local redirection of a non-KnownDLL is still a valid vector.
             // (Windows XP/2003 were the exception; this tool targets Vista+ environments.)
             if (c.Type == HijackType.DotLocal)
             {
-                c.FilterResults["KnownDLLs"] = FilterResult.Failed;
-                return false;
-            }
+                if (isKnownDll)
+                {
+                    c.FilterResults["KnownDLLs"] = FilterResult.Failed;
+                    return false;
+                }
 
-            // Check both native and WoW64 KnownDLLs
-            bool isKnownDll = _knownDlls.Contains(dll) || _knownDlls32.Contains(dll);
+                c.FilterResults["KnownDLLs"] = FilterResult.Passed;
+                return true;
+            }
 
             if (isKnownDll)
             {
