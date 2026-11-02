@@ -438,6 +438,15 @@ public class CanaryEngine
         }
     }
 
+    /// <summary>
+    /// COM objects whose code runs in (or as) the activating client: InprocServer32 ("VARIES")
+    /// and LocalServer32 without a fixed RunAs identity. A fixed RunAs / LocalService server
+    /// is launched by the COM SCM under its configured account, so its canary identity is real.
+    /// </summary>
+    private static bool IsCallerContextCom(HijackCandidate candidate) =>
+        candidate.Trigger == TriggerType.COM &&
+        candidate.RunAsAccount is "VARIES" or "Launching User" or "Interactive User" or "";
+
     private static void ParseConfirmation(HijackCandidate candidate, string confirmPath)
     {
         try
@@ -460,14 +469,34 @@ public class CanaryEngine
                 }
             }
 
-            candidate.ConfirmedPrivilege = data.GetValueOrDefault("USER", "Unknown");
-            candidate.ConfirmedIntegrityLevel = data.GetValueOrDefault("INTEGRITY", "Unknown");
-            candidate.ConfirmedSeDebug = data.GetValueOrDefault("SE_DEBUG", "NO")
+            string observedUser = data.GetValueOrDefault("USER", "Unknown");
+            string observedIntegrity = data.GetValueOrDefault("INTEGRITY", "Unknown");
+            bool observedSeDebug = data.GetValueOrDefault("SE_DEBUG", "NO")
                 .Equals("YES", StringComparison.OrdinalIgnoreCase);
 
-            candidate.Notes.Add($"✓ CANARY CONFIRMED: Running as {candidate.ConfirmedPrivilege} " +
-                $"at {candidate.ConfirmedIntegrityLevel} integrity" +
-                (candidate.ConfirmedSeDebug == true ? " with SeDebugPrivilege" : ""));
+            if (IsCallerContextCom(candidate))
+            {
+                // The COM trigger activates the object from a PowerShell process spawned by this
+                // (elevated) scanner. For in-proc / launching-user servers the canary therefore
+                // runs with the SCANNER's token — proof that the DLL loads, but not of the
+                // privilege an attacker would gain. Do not let it inflate impact scoring.
+                candidate.ConfirmedPrivilege = "Caller context (scanner-activated)";
+                candidate.ConfirmedIntegrityLevel = "n/a";
+                candidate.ConfirmedSeDebug = null;
+                candidate.Notes.Add("✓ CANARY CONFIRMED: DLL load verified. Identity observed " +
+                    $"({observedUser}, {observedIntegrity} integrity) is the scanner-launched COM " +
+                    "client, not the victim — real privilege depends on which process activates this object.");
+            }
+            else
+            {
+                candidate.ConfirmedPrivilege = observedUser;
+                candidate.ConfirmedIntegrityLevel = observedIntegrity;
+                candidate.ConfirmedSeDebug = observedSeDebug;
+
+                candidate.Notes.Add($"✓ CANARY CONFIRMED: Running as {candidate.ConfirmedPrivilege} " +
+                    $"at {candidate.ConfirmedIntegrityLevel} integrity" +
+                    (candidate.ConfirmedSeDebug == true ? " with SeDebugPrivilege" : ""));
+            }
 
             try
             {

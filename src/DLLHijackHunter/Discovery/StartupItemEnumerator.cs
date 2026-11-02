@@ -24,17 +24,11 @@ public static class StartupItemEnumerator
                 "Interactive User", results);
         }
 
-        // HKCU Run keys (run as current user)
-        foreach (var keyPath in RunKeyPaths)
-        {
-            EnumerateRunKey(Registry.CurrentUser, keyPath,
-                Native.TokenHelper.GetCurrentUsername(), results);
-        }
-
-        // Startup folders
-        EnumerateStartupFolder(
-            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
-            Native.TokenHelper.GetCurrentUsername(), results);
+        // Per-user Run keys and Startup folders for EVERY user profile, each attributed to
+        // its owner. Using HKCU / SpecialFolder.Startup alone would only see the scanner's
+        // own account — after over-the-shoulder elevation that is the admin, not the users
+        // whose logon actually triggers these entries.
+        EnumeratePerUserStartup(results);
 
         // Common Startup folder runs programs as each user who logs on (NOT SYSTEM)
         EnumerateStartupFolder(
@@ -51,6 +45,96 @@ public static class StartupItemEnumerator
         EnumerateIFEO(results);
 
         return results;
+    }
+
+    private static void EnumeratePerUserStartup(List<DiscoveryContext> results)
+    {
+        var coveredHives = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var coveredFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Loaded user hives under HKEY_USERS (interactive users currently logged on).
+        try
+        {
+            foreach (var sid in Registry.Users.GetSubKeyNames())
+            {
+                if (!IsUserProfileSid(sid)) continue;
+                try
+                {
+                    using var hive = Registry.Users.OpenSubKey(sid);
+                    if (hive == null) continue;
+                    string account = ResolveAccount(sid);
+                    foreach (var keyPath in RunKeyPaths)
+                        EnumerateRunKey(hive, keyPath, account, results);
+                    coveredHives.Add(sid);
+                }
+                catch (Exception ex)
+                {
+                    ScanLogger.Debug($"Could not read Run keys for {sid}: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"Could not enumerate HKEY_USERS: {ex.Message}");
+        }
+
+        // 2. Per-user Startup folders for every local profile (no hive load needed).
+        try
+        {
+            using var profileList = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+            if (profileList != null)
+            {
+                foreach (var sid in profileList.GetSubKeyNames())
+                {
+                    if (!IsUserProfileSid(sid)) continue;
+                    using var profileKey = profileList.OpenSubKey(sid);
+                    if (profileKey?.GetValue("ProfileImagePath") is not string profilePath) continue;
+
+                    string startup = Path.Combine(Environment.ExpandEnvironmentVariables(profilePath),
+                        @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup");
+                    if (coveredFolders.Add(startup))
+                        EnumerateStartupFolder(startup, ResolveAccount(sid), results);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"Could not enumerate profile Startup folders: {ex.Message}");
+        }
+
+        // 3. Fallback for the scanner's own account (e.g. HKEY_USERS not readable when the
+        //    tool runs unelevated, or a roaming/redirected Startup folder).
+        string currentUser = Native.TokenHelper.GetCurrentUsername();
+        string? currentSid = null;
+        try { currentSid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value; } catch { }
+        if (currentSid == null || !coveredHives.Contains(currentSid))
+        {
+            foreach (var keyPath in RunKeyPaths)
+                EnumerateRunKey(Registry.CurrentUser, keyPath, currentUser, results);
+        }
+
+        string ownStartup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+        if (!string.IsNullOrEmpty(ownStartup) && coveredFolders.Add(ownStartup))
+            EnumerateStartupFolder(ownStartup, currentUser, results);
+    }
+
+    // Real user accounts are S-1-5-21-<domain>-<rid> (skip *_Classes, .DEFAULT, service SIDs).
+    private static bool IsUserProfileSid(string sid) =>
+        sid.StartsWith("S-1-5-21-", StringComparison.OrdinalIgnoreCase) &&
+        !sid.EndsWith("_Classes", StringComparison.OrdinalIgnoreCase);
+
+    private static string ResolveAccount(string sid)
+    {
+        try
+        {
+            return new System.Security.Principal.SecurityIdentifier(sid)
+                .Translate(typeof(System.Security.Principal.NTAccount)).Value;
+        }
+        catch
+        {
+            return sid;
+        }
     }
 
     private static void EnumerateRunKey(RegistryKey root, string keyPath,
@@ -80,7 +164,10 @@ public static class StartupItemEnumerator
                 });
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ScanLogger.Debug($"Run key enumeration failed for {root.Name}\\{keyPath}: {ex.Message}");
+        }
     }
 
     private static void EnumerateStartupFolder(string folderPath, string runAs,
