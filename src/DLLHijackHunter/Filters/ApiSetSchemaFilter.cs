@@ -24,9 +24,11 @@ public class ApiSetSchemaFilter : IHardGate
             string dll = c.DllName.ToLowerInvariant();
 
             // Quick prefix check
-            if (dll.StartsWith("api-ms-win-") ||
-                dll.StartsWith("ext-ms-win-") ||
-                dll.StartsWith("api-ms-onecoreuap-"))
+            // Every API set schema contract is named api-ms-* or ext-ms-* (e.g.
+            // ext-ms-windowscore-deviceinfo-l1-1-0, ext-ms-onecore-*), not only *-win-*.
+            // The loader resolves these through the schema, never via the search order.
+            if (dll.StartsWith("api-ms-") ||
+                dll.StartsWith("ext-ms-"))
             {
                 c.FilterResults["ApiSetSchema"] = FilterResult.Failed;
                 return false;

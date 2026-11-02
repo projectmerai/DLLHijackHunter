@@ -404,7 +404,13 @@ public class StaticDiscoveryEngine
         // an attacker can copy the EXE to a writable folder (e.g. %TEMP%), place
         // a malicious DLL next to it, and execute for a silent UAC bypass.
         // Skip KnownDLLs and System32-resident DLLs — these cannot be sideloaded.
-        var uacCtx = contexts.FirstOrDefault(c => c.TriggerType == TriggerType.UACBypass);
+        // Only a manifest-autoElevate EXE can be copied and launched by the attacker. COM
+        // elevation entries (Elevation\Enabled=1) are activated by CLSID from their registered
+        // path — and InprocServer32 entries are DLLs, which cannot be "executed" from a copy.
+        var uacCtx = contexts.FirstOrDefault(c =>
+            c.TriggerType == TriggerType.UACBypass &&
+            c.TriggerIdentifier == "Manifest AutoElevate (Heuristic)" &&
+            binaryPath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
         bool isSideloadBlocked = KnownDllsCache.Value.Contains(dllName.ToLowerInvariant()) ||
             File.Exists(Path.Combine(Environment.SystemDirectory, dllName));
         if (uacCtx != null && !isSideloadBlocked &&
@@ -429,8 +435,10 @@ public class StaticDiscoveryEngine
                 KnowledgeBaseReference = kbRef,
                 Notes =
                 {
-                    "COPY & SIDE-LOAD: Attacker copies this AutoElevate EXE to a writable " +
-                    "folder, places the DLL next to it, and executes for a silent UAC bypass."
+                    "COPY & SIDE-LOAD: Attacker copies this AutoElevate EXE next to a planted DLL " +
+                    "and executes it for a silent UAC bypass. Auto-elevation is only granted from " +
+                    "a trusted directory, so the copy must pass that check (e.g. a mock " +
+                    "'C:\\Windows \\System32\\' folder); a plain %TEMP% copy will show a UAC prompt."
                 }
             });
 
