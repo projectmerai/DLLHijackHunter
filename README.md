@@ -3,7 +3,8 @@
   <img src="https://img.shields.io/badge/.NET-8.0_%7C_10.0-purple?style=for-the-badge&logo=dotnet" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Version-2.5.0-orange?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Black%20Hat%20Arsenal-Sector%202026-CC0000?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Black%20Hat%20Arsenal-Europe%202026-CC0000?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Black%20Hat%20Arsenal-SecTor%202026-CC0000?style=for-the-badge" />
 </p>
 
 <h1 align="center">DLLHijackHunter</h1>
