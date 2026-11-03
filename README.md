@@ -78,26 +78,24 @@ Download or build `DLLHijackHunter.exe` (self-contained; no .NET install needed)
 
 ```mermaid
 flowchart TB
-    subgraph P1["Phase 1 · Discovery"]
-        EN["Enumerators<br/>Services · Tasks · Run keys (all users)<br/>Startup folders · COM (AppID RunAs)<br/>AppInit / AppCert · IFEO · AutoElevate"]
-        PE["PE Analyzer<br/>imports · delay loads · manifest · exports"]
-        SO["Search-order calculator<br/>identity-aware PATH"]
-        ETW["ETW (optional)<br/>live image loads & failed lookups"]
+    subgraph S1["1 · Discovery"]
+        direction LR
+        EN["Launch points<br/>services · tasks · Run keys<br/>startup · COM · AutoElevate"] --> PE["PE analysis<br/>imports · delay loads<br/>manifest"] --> SO["Search order<br/>identity-aware PATH"]
+        ETW["ETW runtime trace<br/>optional, elevated"]
     end
-
-    subgraph P2["Phase 2 · Filter pipeline"]
-        HG["Hard gates<br/>API set · KnownDLLs · writability"]
-        SG["Soft gates<br/>manifest · privilege delta · LoadLibraryEx<br/>PPL / signature · error handling"]
-        DD["Dedup + profile filters"]
+    subgraph S2["2 · Filter pipeline"]
+        direction LR
+        HG["Hard gates<br/>API sets · KnownDLLs<br/>writability"] --> SG["Soft gates<br/>manifest · privilege<br/>PPL · LoadLibraryEx"] --> DD["Dedup and<br/>profile filters"]
     end
-
-    P25["Phase 2.5 · Load probe (--verify-load)<br/>real loader in a child process"]
-    P3["Phase 3 · Canary confirmation<br/>deploy → trigger → confirm → restore"]
-    P4["Phase 4 · Scoring, attack chains, reports<br/>console · JSON · HTML"]
-
-    EN --> PE --> SO --> HG
-    ETW --> HG
-    HG --> SG --> DD --> P25 --> P3 --> P4
+    subgraph S3["3 · Verification (optional)"]
+        direction LR
+        LP["Load probe<br/>real Windows loader"] --> CN["Canary<br/>deploy, trigger, confirm"]
+    end
+    subgraph S4["4 · Output"]
+        direction LR
+        SC["Scoring and tiers"] --> AC["Attack chains"] --> RP["Console · JSON · HTML"]
+    end
+    S1 --> S2 --> S3 --> S4
 ```
 
 | Phase | Requires admin | Modifies the system |
@@ -181,14 +179,19 @@ The probe models where the position really sits: a DLL in the binary's **own dir
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant H as DLLHijackHunter
-    participant T as Service / Task / COM
-    H->>H: Extract precompiled canary (x64/x86)<br/>or synthesise an export-forwarding proxy
-    H->>H: Back up original, deploy canary at hijack path
-    H->>T: sc start / schtasks /run / COM activate
-    T->>T: Loads canary → DllMain writes confirmation<br/>(user, integrity level, SeDebug)
-    H->>H: Poll confirmation → CONFIRMED
-    H->>H: Remove canary, restore original, restore service state
+    participant P as Hijack position
+    participant T as Service / task / COM
+    Note over H: Pick canary for target bitness,<br/>or build an export-forwarding proxy
+    H->>P: Back up original DLL, write canary
+    H->>T: sc start / schtasks /run / COM activation
+    T->>P: Load DLL by name (search order)
+    Note over P,T: Canary DllMain records user,<br/>integrity level and SeDebug
+    T-->>H: Confirmation file written
+    Note over H: Finding marked CONFIRMED
+    H->>P: Remove canary, restore original DLL
+    H->>T: Restore original service state
 ```
 
 - **No compiler needed.** Precompiled x64/x86 canaries are embedded; when the hijacked DLL has exports, an export-forwarding proxy is synthesised at runtime by PE surgery so the host keeps working.
