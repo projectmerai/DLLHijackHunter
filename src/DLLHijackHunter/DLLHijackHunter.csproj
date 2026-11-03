@@ -17,7 +17,7 @@
     <Company>Project Merai</Company>
     <Product>DLLHijackHunter</Product>
     <PackageProjectUrl>https://projectmerai.com/</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/ghostvectoracademy/DLLHijackHunter</RepositoryUrl>
+    <RepositoryUrl>https://github.com/projectmerai/DLLHijackHunter</RepositoryUrl>
     <Copyright>Copyright © 2024-2026 Project Merai. All rights reserved.</Copyright>
     <Description>Automated DLL Hijacking Detection Tool for finding and verifying exploits</Description>
   </PropertyGroup>
