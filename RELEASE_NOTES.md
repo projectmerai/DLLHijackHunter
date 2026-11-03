@@ -1,4 +1,4 @@
-## Unreleased — Audit fixes, false-positive reduction, Windows-verified
+## v2.6.0 — Audit Fixes, False-Positive Reduction, Windows-Verified Detection
 
 Fixes from an external code audit (9 claims, independently verified) plus a full independent bug hunt. Verified on Windows 10 Pro 26H2 (build 26300) with an inert lab: a writable SYSTEM service and a LaunchProtected one, a task with a SID principal, a Run key, and writable machine-PATH and user-PATH folders. Not yet exercised on Windows: ETW full-path resolution (no ETW candidates on the test host), COM `RunAs` resolution for a SYSTEM-configured server, and the canary changes (the canary was not run). No breaking CLI changes; one new exit code (3).
 
