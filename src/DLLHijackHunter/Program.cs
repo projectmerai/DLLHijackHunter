@@ -14,6 +14,66 @@ namespace DLLHijackHunter;
 
 public class Program
 {
+    /// <summary>
+    /// Clean up a --target value. A quoted directory ending in a backslash ("C:\dir\") reaches
+    /// us as C:\dir" because Windows argument parsing reads \" as a literal quote; tab
+    /// completion produces exactly that. Strip stray quotes/whitespace and trailing
+    /// separators, but keep a drive root as "C:\".
+    /// </summary>
+    internal static string NormalizeTargetPath(string target)
+    {
+        string t = target.Trim().Trim('"', '\'').Trim();
+        t = t.TrimEnd('\\', '/');
+        if (t.Length == 2 && t[1] == ':' && char.IsLetter(t[0]))
+            t += Path.DirectorySeparatorChar;
+        return t;
+    }
+
+    /// <summary>
+    /// Rewrite a lone backslash directly before a closing quote (\" followed by whitespace or end)
+    /// as \\" — i.e. "backslash, then end of quoted argument". Under the Windows argument rules
+    /// the original \" is a literal quote, which keeps the quoted region open and swallows every
+    /// following option (-t "C:\dir\" -o x.html → target 'C:\dir" -o x.html').
+    /// </summary>
+    internal static string RepairTrailingBackslashQuotes(string commandLine) =>
+        System.Text.RegularExpressions.Regex.Replace(commandLine, @"(?<!\\)\\""(?=\s|$)", @"\\""");
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true,
+        CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+
+    /// <summary>Split a command line with the same rules the C runtime uses for argv.</summary>
+    internal static string[] SplitCommandLine(string commandLine)
+    {
+        IntPtr argv = CommandLineToArgvW(commandLine, out int argc);
+        if (argv == IntPtr.Zero) return Array.Empty<string>();
+        try
+        {
+            var result = new string[argc];
+            for (int i = 0; i < argc; i++)
+                result[i] = System.Runtime.InteropServices.Marshal.PtrToStringUni(
+                    System.Runtime.InteropServices.Marshal.ReadIntPtr(argv, i * IntPtr.Size)) ?? "";
+            return result;
+        }
+        finally { DLLHijackHunter.Native.NativeMethods.LocalFree(argv); }
+    }
+
+    /// <summary>
+    /// Re-split the raw command line when it contains a trailing-backslash quote; otherwise
+    /// return <paramref name="args"/> untouched.
+    /// </summary>
+    internal static string[] RepairArgs(string rawCommandLine, string[] args)
+    {
+        try
+        {
+            string repaired = RepairTrailingBackslashQuotes(rawCommandLine);
+            if (repaired == rawCommandLine) return args;
+            var argv = SplitCommandLine(repaired);
+            return argv.Length > 0 ? argv.Skip(1).ToArray() : args;   // argv[0] = exe path
+        }
+        catch { return args; }
+    }
+
     public static async Task<int> Main(string[] args)
     {
         // Hidden child mode for --verify-load: resolve one DLL name with a writable directory added
@@ -26,6 +86,9 @@ public class Program
             return LoadProbe.RunChild(args[1], args[2],
                 traditional: args.Length > 3 && args[3] == "traditional");
         }
+
+        // -t "C:\dir\" (tab completion adds the trailing \) otherwise eats every later option.
+        args = RepairArgs(Environment.CommandLine, args);
 
         // Prevent accidental scan freezes from the legacy console's QuickEdit Mode:
         // a stray click in the window would otherwise put it into mark/select mode and
@@ -243,7 +306,9 @@ public class Program
 
         if (!string.IsNullOrEmpty(target))
         {
-            profile.TargetPath = target;
+            string normalized = NormalizeTargetPath(target);
+            if (!string.IsNullOrEmpty(normalized))
+                profile.TargetPath = normalized;
         }
 
         // ─── Confirmed-only guard ───
