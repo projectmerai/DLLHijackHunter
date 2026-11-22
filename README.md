@@ -265,6 +265,7 @@ Each finding gets a **confidence** (from the filters, probe, canary, and knowled
 | `0` | Scan completed (with or without findings) |
 | `1` | Unhandled error |
 | `3` | `--confirmed-only` (or the `redteam` profile) requested, but the canary cannot run — not elevated, or canary disabled. Refused instead of reporting a false "0 findings". |
+| `4` | Scan completed, but artifacts could not be removed. Each is listed in the JSON `Residue` array and a red console block, with its holder when known and whether a delete at reboot was scheduled. Takes precedence over `0`, not over `1` or `3`. |
 
 ---
 
@@ -276,6 +277,9 @@ Use DLLHijackHunter only on systems you own or are explicitly authorised to asse
 - **ETW mode starts services and runs scheduled tasks** to provoke DLL loads, even without the canary.
 - **Canary mode** replaces DLLs (with backup/restore), stops and restarts services, runs tasks, and activates COM objects. Fragile services can misbehave while a proxy canary is loaded.
 - **`--verify-load`** writes probe DLLs transiently into writable positions.
+- **Protected and security services are never stopped or restarted** — services with `LaunchProtected` set, Microsoft security services (WinDefend, WdNisSvc, Sense, MpsSvc, BFE, …), anything running from the Defender folders, and the third-party EDR/AV services in `Resources/security_services.json` (each with its vendor source). Such a service gets no canary (`NotTested`, with the reason); the ETW phase never sends it `stop`.
+- **Every file the tool places is recorded first** in `%ProgramData%\DLLHijackHunter\artifacts.json`. At startup, leftovers from an earlier run are deleted only if their hash matches what that run wrote, and recorded backups are restored. A file at a deploy path that is a previous DLLHijackHunter artifact is never treated as the original. A file that cannot be removed is retried, its holder is named via the Restart Manager, a delete at reboot is scheduled, and it is reported as residue (exit code `4`).
+- **Audit trail**: every file, service, task and COM action is written to the `--log-file` at Info level (regardless of `--verbose`) and to each finding's `CanaryActions` in the JSON.
 - Unsigned canary/probe DLLs may be quarantined by antivirus; such results are reported as inconclusive (`Blocked` / probe `Error`), never as "not vulnerable".
 
 ---
