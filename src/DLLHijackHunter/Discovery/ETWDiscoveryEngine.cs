@@ -666,7 +666,7 @@ public class ETWDiscoveryEngine
             if (targetSet)
             {
                 foreach (var svc in services)
-                    if (IsRunningState(await RunScAsync($"query \"{svc.TriggerIdentifier}\"", 5000)))
+                    if (IsRunningState(await ServiceControl.QueryAsync(svc.TriggerIdentifier, 5000)))
                         running.Add(svc.TriggerIdentifier);
             }
 
@@ -683,23 +683,31 @@ public class ETWDiscoveryEngine
             {
                 try
                 {
+                    if (step.Refusal != null && running.Contains(step.Service))
+                    {
+                        // 9c91eab would have restarted it here. Record the refusal; send nothing.
+                        Audit.Record(EtwActor, null, "service-stop", step.Service, "refused-by-guard: " + step.Refusal);
+                        AnsiConsole.MarkupLine($"[yellow]  Not restarting {Markup.Escape(step.Service)}: {Markup.Escape(step.Refusal)}[/]");
+                    }
+
                     if (step.Stop)
                     {
                         ScanLogger.Debug($"ETW: restarting running target service '{step.Service}' under trace");
                         AnsiConsole.MarkupLine($"[yellow]  Restarting running service {Markup.Escape(step.Service)} " +
                             "so its startup is traced[/]");
-                        await RunScAsync($"stop \"{step.Service}\"", 10000);
+                        var stop = await ServiceControl.StopAsync(step.Service, 10000, EtwActor);
+                        if (stop.outcome != ServiceActionOutcome.Sent) continue;   // refused or blocked: leave it alone
                         // Wait for STOPPED (sc stop returns at STOP_PENDING) before starting again.
                         for (int i = 0; i < 30; i++)
                         {
-                            string q = await RunScAsync($"query \"{step.Service}\"", 5000);
+                            string q = await ServiceControl.QueryAsync(step.Service, 5000);
                             if (q.Contains("STOPPED", StringComparison.OrdinalIgnoreCase)) break;
                             await Task.Delay(500);
                         }
                     }
 
                     if (step.Start)
-                        await RunScAsync($"start \"{step.Service}\"", 5000);
+                        await ServiceControl.StartAsync(step.Service, 5000, EtwActor);
                 }
                 catch { }
             }
@@ -716,11 +724,29 @@ public class ETWDiscoveryEngine
     internal static List<ServiceTriggerStep> PlanServiceTriggers(IEnumerable<string> services, bool targetSet,
         ISet<string> running, Func<string, (bool guarded, string reason)> guard, out bool capExceeded)
     {
-        bool restart = ShouldRestartRunningServices(targetSet, running.Count);
-        capExceeded = running.Count > 0 && !restart;
-        return services
-            .Select(s => new ServiceTriggerStep(s, restart && running.Contains(s), true, null))
-            .ToList();
+        var list = services.ToList();
+        var verdicts = list.ToDictionary(s => s, s => guard(s), StringComparer.OrdinalIgnoreCase);
+
+        // Guarded services never count toward the restart cap: they are never restarted.
+        int restartable = list.Count(s => running.Contains(s) && !verdicts[s].guarded);
+        bool restart = ShouldRestartRunningServices(targetSet, restartable);
+        capExceeded = restartable > 0 && !restart;
+
+        var plan = new List<ServiceTriggerStep>();
+        foreach (var s in list)
+        {
+            var (guarded, reason) = verdicts[s];
+            bool isRunning = running.Contains(s);
+            if (guarded)
+            {
+                // Never send stop to a guarded service. Starting a stopped one is allowed.
+                plan.Add(new ServiceTriggerStep(s, Stop: false, Start: !isRunning,
+                    Refusal: reason.Length > 0 ? reason : "guarded"));
+                continue;
+            }
+            plan.Add(new ServiceTriggerStep(s, restart && isRunning, true, null));
+        }
+        return plan;
     }
 
     /// <summary>Most running services a --target scan will restart; beyond this it only starts.</summary>
@@ -732,29 +758,8 @@ public class ETWDiscoveryEngine
     internal static bool IsRunningState(string scQueryOutput) =>
         scQueryOutput.Contains("RUNNING", StringComparison.OrdinalIgnoreCase);
 
-    private static async Task<string> RunScAsync(string arguments, int timeoutMs)
-    {
-        try
-        {
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "sc.exe",
-                Arguments = arguments,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            using var proc = System.Diagnostics.Process.Start(psi);
-            if (proc == null) return "";
-            var stdout = proc.StandardOutput.ReadToEndAsync();
-            using var cts = new CancellationTokenSource(timeoutMs);
-            try { await proc.WaitForExitAsync(cts.Token); }
-            catch { try { proc.Kill(); } catch { } }
-            return stdout.IsCompleted ? stdout.Result : "";
-        }
-        catch { return ""; }
-    }
+    /// <summary>Actor id in the audit trail for actions taken by the ETW phase itself.</summary>
+    internal const string EtwActor = "etw-trigger";
 
     private async Task TriggerScheduledTasks()
     {

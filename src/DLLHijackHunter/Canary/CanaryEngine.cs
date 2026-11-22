@@ -1,5 +1,6 @@
 using DLLHijackHunter.Models;
 using DLLHijackHunter.Discovery;
+using DLLHijackHunter.Safety;
 using Spectre.Console;
 
 namespace DLLHijackHunter.Canary;
@@ -97,6 +98,22 @@ public class CanaryEngine
 
         try
         {
+            // Never stop, restart or plant for a protected or security-product service: it gets
+            // no canary at all. Discovery and the finding itself are unchanged.
+            if (candidate.Trigger == TriggerType.Service)
+            {
+                var (guarded, why) = ServiceControl.Guard(candidate.TriggerIdentifier);
+                if (guarded)
+                {
+                    candidate.CanaryResult = CanaryResult.NotTested;
+                    candidate.Notes.Add($"Canary not run: service guard refused '{candidate.TriggerIdentifier}' — {why}. " +
+                        "The tool never stops or restarts protected or security-product services.");
+                    Audit.Record(canaryId, candidate, "service-stop", candidate.TriggerIdentifier,
+                        "refused-by-guard: " + why);
+                    return;
+                }
+            }
+
             // Determine architecture
             bool is64Bit = true;
             try
@@ -178,25 +195,8 @@ public class CanaryEngine
             bool serviceWasRunning = false;
             if (candidate.Trigger == TriggerType.Service)
             {
-                try
-                {
-                    var queryPsi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = "sc.exe",
-                        Arguments = $"query \"{candidate.TriggerIdentifier}\"",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardOutput = true
-                    };
-
-                    using var queryProc = System.Diagnostics.Process.Start(queryPsi);
-                    string queryOut = queryProc?.StandardOutput.ReadToEnd() ?? string.Empty;
-                    queryProc?.WaitForExit(2000);
-                    serviceWasRunning = queryOut.Contains("RUNNING", StringComparison.OrdinalIgnoreCase);
-                }
-                catch
-                {
-                }
+                string queryOut = await ServiceControl.QueryAsync(candidate.TriggerIdentifier, 5000);
+                serviceWasRunning = queryOut.Contains("RUNNING", StringComparison.OrdinalIgnoreCase);
             }
 
             // Pre-deploy service stop: a running service keeps the DLL mapped and its file
@@ -206,22 +206,8 @@ public class CanaryEngine
             // running state once testing is complete.
             if (candidate.Trigger == TriggerType.Service && serviceWasRunning)
             {
-                try
-                {
-                    var preStopPsi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = "sc.exe",
-                        Arguments = $"stop \"{candidate.TriggerIdentifier}\"",
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    using var preStopProc = System.Diagnostics.Process.Start(preStopPsi);
-                    preStopProc?.WaitForExit(5000);
-                    await Task.Delay(1500); // allow the service process to exit and unload the DLL
-                }
-                catch
-                {
-                }
+                await ServiceControl.StopAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
+                await Task.Delay(1500); // allow the service process to exit and unload the DLL
             }
 
             if (hadExistingDll)
@@ -291,7 +277,7 @@ public class CanaryEngine
 
                 // Trigger execution
                 bool triggered = await TriggerExecutor.TriggerAsync(
-                    candidate, _profile.CanaryTimeoutSeconds);
+                    candidate, _profile.CanaryTimeoutSeconds, canaryId);
 
                 // If execution could not be triggered at all, fail immediately.
                 if (!triggered)
@@ -353,24 +339,7 @@ public class CanaryEngine
             {
                 // For services, stop first to reduce DLL/file locking before cleanup/restore
                 if (candidate.Trigger == TriggerType.Service)
-                {
-                    try
-                    {
-                        var stopPsi = new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = "sc.exe",
-                            Arguments = $"stop \"{candidate.TriggerIdentifier}\"",
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-
-                        using var stopProc = System.Diagnostics.Process.Start(stopPsi);
-                        stopProc?.WaitForExit(5000);
-                    }
-                    catch
-                    {
-                    }
-                }
+                    await ServiceControl.StopAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
 
                 // Cleanup: remove canary DLL
                 try
@@ -432,24 +401,8 @@ public class CanaryEngine
                 // Restore service to its original state
                 if (candidate.Trigger == TriggerType.Service && serviceWasRunning)
                 {
-                    try
-                    {
-                        await Task.Delay(1000);
-
-                        var startPsi = new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = "sc.exe",
-                            Arguments = $"start \"{candidate.TriggerIdentifier}\"",
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-
-                        using var startProc = System.Diagnostics.Process.Start(startPsi);
-                        startProc?.WaitForExit(5000);
-                    }
-                    catch
-                    {
-                    }
+                    await Task.Delay(1000);
+                    await ServiceControl.StartAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
                 }
             }
         }
