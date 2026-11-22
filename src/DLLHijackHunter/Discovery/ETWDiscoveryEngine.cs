@@ -924,15 +924,24 @@ public class ETWDiscoveryEngine
                         RedirectStandardOutput = true,
                         RedirectStandardError = true
                     };
-                    var proc = System.Diagnostics.Process.Start(psi);
+                    using var proc = System.Diagnostics.Process.Start(psi);
+                    string result = "failed: schtasks did not start";
                     if (proc != null)
                     {
                         using var cts = new CancellationTokenSource(5000);
-                        try { await proc.WaitForExitAsync(cts.Token); }
-                        catch { try { proc.Kill(); } catch { } }
+                        try
+                        {
+                            await proc.WaitForExitAsync(cts.Token);
+                            result = proc.ExitCode == 0 ? "sent" : $"failed: exit {proc.ExitCode}";
+                        }
+                        catch { try { proc.Kill(); } catch { } result = "failed: timeout"; }
                     }
+                    Audit.Record(EtwActor, null, "task-run", task.TriggerIdentifier, result);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Audit.Record(EtwActor, null, "task-run", task.TriggerIdentifier, "failed: " + ex.Message);
+                }
             }
             await Task.Delay(2000);
         }
