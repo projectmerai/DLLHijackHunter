@@ -1,3 +1,33 @@
+## Unreleased — Canary safety and ETW attribution
+
+Fixes for the first safety defects found on the HijackRange lab (TIER 0B, 2026-11-21). In one aggressive scan, the canary for an ETW finding attributed to `MsMpEng.exe` ran `sc.exe stop WinDefend`, which Defender flagged as `Trojan:Win32/MpTamperSrvDisableAV.H`. A canary that could not be deleted was left at a Users-writable machine-PATH position, and later runs treated it as the original DLL. The tool's own file activity also became findings.
+
+### Safety
+- **Service guard.** One decision, `ServiceGuard.IsGuarded`, covers `LaunchProtected` services, Microsoft security services, binaries under the Defender folders, and an embedded, source-cited list of third-party EDR/AV services. Every stop goes through `ServiceControl`, which cannot build a stop for a guarded service. A guarded service gets no canary (`NotTested` plus the reason), and the ETW phase never sends it `stop`.
+- **Artifact manifest.** `%ProgramData%\DLLHijackHunter\artifacts.json` records each canary, sidecar, backup and confirm file before it is placed. It is written atomically and accepted only if owned by SYSTEM or Administrators. A startup sweep deletes hash-matched leftovers, restores backups, and reports the rest.
+- **Previous artifacts.** A previous artifact at a deploy path (manifest hash match, or the canary marker) is never backed up or proxied. Runtime proxies now carry an explicit marker.
+- **Cleanup on failure.** On a failed cleanup the tool stops the trigger again, retries with backoff, names the holder via the Restart Manager, and schedules `MOVEFILE_DELAY_UNTIL_REBOOT`.
+- **Residue.** Anything left behind goes in the JSON `Residue` array, a red console block, and new **exit code 4**.
+
+### ETW attribution
+- The scanner's own PID and all of its descendants, tracked by parent PID, are excluded.
+- File opens by security-product processes are not lookups.
+- Tool artifacts never become candidates: `*_hhorig.dll`, `*.hijackhunter.bak`, `*.probebak`, the tool folder, and manifest entries.
+- Process paths are resolved from the EXE's own image-load event or its command line before `OpenProcess`, so short-lived processes keep their full path. When no full path is found the finding says `binary path unresolved` and `BinaryPath` is empty; it is never a bare name.
+
+### Scoring
+- `Failed` caused by the harness (could not trigger, back up, or stage the sidecar; target directory missing) no longer costs −20. The cause is recorded in `CanaryFailureCause`. `Timeout` keeps −10.
+
+### Audit
+- Every side effect is logged at Info level, with a UTC time and ID, whether or not `--verbose` is set. Each finding carries the same list as `CanaryActions`.
+
+### New JSON fields (additive; existing names unchanged)
+- **Top level:** `ScanId`, `Residue[]` (`Path`, `Role`, `Sha256`, `Holder`, `DelayedDeleteScheduled`, `CandidateId`, `Reason`) and `ArtifactSweep[]` (`Path`, `Role`, `Outcome`, `ScanId`, `Detail`).
+- **Per finding:** `CanaryFailureCause`, `CanaryActions[]` (`Utc`, `Action`, `Target`, `Result`) and `BinaryImageName`.
+
+### Tests
+- New `tests/DLLHijackHunter.Tests` (xUnit, `net8.0-windows`) covers the guard, attribution, artifact, cleanup, audit and scoring decisions with no side effects outside a temp directory.
+
 ## v2.6.0 — Audit Fixes, False-Positive Reduction, Windows-Verified Detection
 
 Fixes from an external code audit (9 claims, independently verified) plus a full independent bug hunt. Verified on Windows 10 Pro 26H2 (build 26300) with an inert lab: a writable SYSTEM service and a LaunchProtected one, a task with a SID principal, a Run key, and writable machine-PATH and user-PATH folders. Not yet exercised on Windows: ETW full-path resolution (no ETW candidates on the test host), COM `RunAs` resolution for a SYSTEM-configured server, and the canary changes (the canary was not run). No breaking CLI changes; one new exit code (3).
