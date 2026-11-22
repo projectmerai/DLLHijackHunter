@@ -28,5 +28,6 @@ internal sealed class EtwEnvironment
     public Func<string, bool> IsSecurityProductImage { get; init; } = ServiceGuard.IsSecurityProductImage;
 
     /// <summary>Path is a DLLHijackHunter artifact (sidecar, backup, tool folder, manifest entry).</summary>
-    public Func<string, bool> IsToolArtifact { get; init; } = _ => false;
+    public Func<string, bool> IsToolArtifact { get; init; } =
+        p => Canary.ArtifactPaths.IsToolArtifact(p, Canary.ArtifactManifest.Current);
 }
