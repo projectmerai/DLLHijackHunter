@@ -19,6 +19,14 @@ public class TieredScorer
         {
             c.Confidence = 100.0;
         }
+        else if (c.CanaryResult == CanaryResult.Failed && !string.IsNullOrEmpty(c.CanaryFailureCause))
+        {
+            // The harness failed (could not trigger, back up, stage the sidecar, or the target
+            // directory was missing): that is not evidence against the hijack. No penalty.
+            const string InconclusiveNote = "Canary inconclusive: the test harness failed ({0}); no confidence penalty applied.";
+            string note = string.Format(InconclusiveNote, c.CanaryFailureCause);
+            if (!c.Notes.Contains(note)) c.Notes.Add(note);
+        }
         else if (c.CanaryResult == CanaryResult.Failed)
         {
             c.Confidence -= 20;
