@@ -19,6 +19,20 @@ public class ETWDiscoveryEngine
     private readonly ConcurrentBag<HijackCandidate> _candidates = new();
     private readonly ConcurrentDictionary<string, byte> _failedLookups = new();
     private readonly EtwEnvironment _env;
+    // The scanner's PID and every descendant (by ProcessStart parent PID).
+    private readonly ConcurrentDictionary<int, byte> _selfTree = new();
+    // EXE image-load paths seen before the matching ProcessStart was processed.
+    private readonly ConcurrentDictionary<int, string> _exeImageByPid = new();
+
+    internal const string BinaryPathUnresolvedNote = "binary path unresolved";
+
+    private static void MarkUnresolved(HijackCandidate candidate, DiscoveryContext? ctx)
+    {
+        if (!string.IsNullOrEmpty(candidate.BinaryPath) && Path.IsPathRooted(candidate.BinaryPath)) return;
+        candidate.BinaryPath = "";   // never a bare name posing as a path
+        if (ctx is { ImageName.Length: > 0 }) candidate.BinaryImageName = ctx.ImageName;
+        if (!candidate.Notes.Contains(BinaryPathUnresolvedNote)) candidate.Notes.Add(BinaryPathUnresolvedNote);
+    }
 
     public ETWDiscoveryEngine(ScanProfile profile) : this(profile, new EtwEnvironment()) { }
 
@@ -27,6 +41,7 @@ public class ETWDiscoveryEngine
     {
         _profile = profile;
         _env = env;
+        _selfTree[env.SelfPid] = 0;
     }
 
     /// <summary>Candidates created so far (tests read this instead of running a trace).</summary>
@@ -68,6 +83,10 @@ public class ETWDiscoveryEngine
             SeedRunningProcesses();
 
             session.Source.Kernel.ProcessStart += OnProcessStart;
+            session.Source.Kernel.ProcessStop += data =>
+            {
+                try { HandleProcessStop(data.ProcessID); } catch { }
+            };
             session.Source.Kernel.ImageLoad += OnImageLoad;
             session.Source.Kernel.FileIOCreate += OnFileIOCreate;
 
@@ -141,12 +160,13 @@ public class ETWDiscoveryEngine
             if (!string.IsNullOrEmpty(candidate.BinaryPath))
                 contextByPath.TryGetValue(candidate.BinaryPath, out ctx);
 
-            // Fall back to filename match
-            if (ctx == null && !string.IsNullOrEmpty(candidate.BinaryPath))
-            {
-                string name = Path.GetFileName(candidate.BinaryPath).ToLowerInvariant();
-                contextByName.TryGetValue(name, out ctx);
-            }
+            // Fall back to filename match (for an unresolved path, the short image name: the
+            // trigger is inherited, the path stays empty)
+            string? shortName = !string.IsNullOrEmpty(candidate.BinaryPath)
+                ? Path.GetFileName(candidate.BinaryPath)
+                : candidate.BinaryImageName;
+            if (ctx == null && !string.IsNullOrEmpty(shortName))
+                contextByName.TryGetValue(shortName.ToLowerInvariant(), out ctx);
 
             if (ctx != null)
             {
@@ -221,13 +241,62 @@ public class ETWDiscoveryEngine
 
     internal void HandleProcessStart(int pid, int parentPid, string imageFileName, string commandLine)
     {
+        // The scanner's own process tree (probe children, sc.exe, schtasks.exe, powershell.exe
+        // it spawns, and their children) is tracked by parent PID, never by name.
+        if (pid != _env.SelfPid)
+        {
+            if (_selfTree.ContainsKey(parentPid)) _selfTree[pid] = 0;
+            else _selfTree.TryRemove(pid, out _);   // a reused PID is not ours
+        }
+
         // ImageFileName in the kernel event is only the short image name ("svchost.exe"),
-        // not a path. Resolve the full Win32 path from the live process; fall back to the
-        // short name only if the process has already exited.
-        string fullPath = _env.QueryImagePath(pid) ?? imageFileName;
-        var ctx = BuildContext(pid, fullPath, commandLine);
+        // not a path. Resolve the full path without depending on the process still being
+        // alive: its own EXE image-load event, then its command line, then OpenProcess.
+        string? fullPath = null;
+        if (_exeImageByPid.TryRemove(pid, out var exeImage) && NameMatches(exeImage, imageFileName))
+            fullPath = exeImage;
+        fullPath ??= PathFromCommandLine(commandLine, imageFileName);
+        fullPath ??= _env.QueryImagePath(pid);
+
+        var ctx = BuildContext(pid, fullPath ?? "", commandLine);
+        ctx.ImageName = imageFileName;
+        ctx.BinaryPathUnresolved = fullPath == null;
         ctx.ParentPid = parentPid;
         TrackProcess(ctx);
+    }
+
+    internal void HandleProcessStop(int pid)
+    {
+        if (pid != _env.SelfPid) _selfTree.TryRemove(pid, out _);
+        _exeImageByPid.TryRemove(pid, out _);
+    }
+
+    /// <summary>PID is the scanner itself or one of its descendants.</summary>
+    internal bool IsSelfOrDescendant(int pid) => _selfTree.ContainsKey(pid);
+
+    /// <summary>
+    /// The kernel's ImageFileName can be truncated (EPROCESS keeps 15 characters), so a long
+    /// name matches by prefix.
+    /// </summary>
+    private static bool NameMatches(string fullPath, string shortName)
+    {
+        if (string.IsNullOrEmpty(shortName)) return true;
+        string name = Path.GetFileName(fullPath);
+        return name.Equals(shortName, StringComparison.OrdinalIgnoreCase) ||
+               (shortName.Length >= 14 && name.StartsWith(shortName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The executable from a command line, if it is a rooted path naming this image.</summary>
+    internal static string? PathFromCommandLine(string commandLine, string imageFileName)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine)) return null;
+        try
+        {
+            string exe = CommandLineParser.ExtractExecutablePath(commandLine.Trim());
+            if (string.IsNullOrEmpty(exe) || !Path.IsPathRooted(exe) || exe.StartsWith(@"\\?\")) return null;
+            return NameMatches(exe, imageFileName) ? exe : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>Record an already-running process (used by the seed pass and by tests).</summary>
@@ -243,6 +312,25 @@ public class ETWDiscoveryEngine
     {
         foreach (var ctx in _processes.Values)
             if (ctx.ParentPid > 0) LinkToParent(ctx);
+        MarkSeededDescendants();
+    }
+
+    /// <summary>Already-running children of the scanner (started before the session) are ours too.</summary>
+    private void MarkSeededDescendants()
+    {
+        foreach (var ctx in _processes.Values)
+        {
+            var seen = new HashSet<int>();
+            for (var cur = ctx; cur != null && seen.Add(cur.Pid);
+                 cur = cur.ParentPid > 0 && _processes.TryGetValue(cur.ParentPid, out var p) ? p : null)
+            {
+                if (cur.ParentPid == _env.SelfPid || cur.Pid == _env.SelfPid)
+                {
+                    _selfTree[ctx.Pid] = 0;
+                    break;
+                }
+            }
+        }
     }
 
     private void SeedRunningProcesses()
@@ -275,6 +363,7 @@ public class ETWDiscoveryEngine
                 }
                 LinkToParent(ctx);
             }
+            MarkSeededDescendants();
         }
         catch (Exception ex)
         {
@@ -521,7 +610,33 @@ public class ETWDiscoveryEngine
     internal void HandleImageLoad(int pid, string fileName)
     {
         {
+            // The scanner and its descendants are never victims.
+            if (_selfTree.ContainsKey(pid)) return;
+
+            // A process's own EXE image load carries its full path, even when the process is
+            // gone by the time we could ask for it.
+            if (fileName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && Path.IsPathRooted(fileName))
+            {
+                if (_processes.TryGetValue(pid, out var p))
+                {
+                    if (p.BinaryPathUnresolved && NameMatches(fileName, p.ImageName))
+                    {
+                        p.BinaryPath = fileName;
+                        p.BinaryPathUnresolved = false;
+                    }
+                }
+                else _exeImageByPid.TryAdd(pid, fileName);
+                return;
+            }
+
             if (!fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) return;
+
+            // Loads of the tool's own artifacts (a leftover sidecar, a backup) are not findings.
+            if (_env.IsToolArtifact(fileName))
+            {
+                ScanLogger.Debug($"ETW: ignored load of DLLHijackHunter artifact {fileName} (PID {pid})");
+                return;
+            }
 
             if (_processes.TryGetValue(pid, out var ctx))
             {
@@ -568,6 +683,7 @@ public class ETWDiscoveryEngine
                         }
                     };
                     ApplyProcessContext(candidate, ctx);
+                    MarkUnresolved(candidate, ctx);
                     _candidates.Add(candidate);
                 }
             }
@@ -585,6 +701,18 @@ public class ETWDiscoveryEngine
         {
             if (!fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) return;
 
+            // The scanner's own existence checks (including this handler's File.Exists below)
+            // and its children's file activity are not DLL lookups by a victim.
+            if (_selfTree.ContainsKey(pid)) return;
+
+            // Never a candidate: the tool's own artifacts (*_hhorig.dll, backups, its folder,
+            // manifest entries).
+            if (_env.IsToolArtifact(fileName))
+            {
+                ScanLogger.Debug($"ETW: ignored open of DLLHijackHunter artifact {fileName} (PID {pid})");
+                return;
+            }
+
             if (!_env.FileExists(fileName))
             {
                 string lookupKey = $"{pid}|{fileName}";
@@ -601,6 +729,15 @@ public class ETWDiscoveryEngine
                         _processes.TryGetValue(pid, out var ctx);
                         if (!ShouldAttributeLookup(ctx)) return;
 
+                        // A security product opening a file (to scan it) is not a loader lookup.
+                        // Logged for diagnostics; no candidate.
+                        if (ctx != null && _env.IsSecurityProductImage(ctx.BinaryPath))
+                        {
+                            ScanLogger.Debug($"ETW: ignored file open of {fileName} by security product " +
+                                $"{ctx.BinaryPath} (PID {pid})");
+                            return;
+                        }
+
                         if (ctx != null)
                         {
                             processPath = ctx.BinaryPath;
@@ -611,6 +748,8 @@ public class ETWDiscoveryEngine
                         var candidate = new HijackCandidate
                         {
                             BinaryPath = processPath,
+                            BinaryImageName = ctx is { BinaryPathUnresolved: true } && ctx.ImageName.Length > 0
+                                ? ctx.ImageName : null,
                             DllName = dllName,
                             DllLegitPath = null,
                             Type = HijackType.Phantom,
@@ -625,6 +764,7 @@ public class ETWDiscoveryEngine
                             }
                         };
                         if (ctx != null) ApplyProcessContext(candidate, ctx);
+                        MarkUnresolved(candidate, ctx);
 
                         // The probed path is missing, but the DLL may exist in the system dir the
                         // loader falls through to (app dir is searched first). Record that copy so
