@@ -3,6 +3,7 @@ using System.Text;
 using DLLHijackHunter.Canary;
 using DLLHijackHunter.Models;
 using DLLHijackHunter.Native;
+using DLLHijackHunter.Safety;
 using Spectre.Console;
 
 namespace DLLHijackHunter.Verification;
@@ -217,16 +218,46 @@ public static class LoadProbe
 
         string? backup = null;
         bool placed = false;
+        string probeId = "probe-" + c.Id;
+        var fs = ScanSession.Files;
+        string? probeHash = ArtifactHash.OfFile(probeDll);
+        string? originalHash = null;
+        void Act(string action, string tgt, string result) => Audit.Record(probeId, c, action, tgt, result);
+
+        // Never probe over a DLLHijackHunter artifact as if it were the original.
+        var (kind, why) = CanaryEngine.ClassifyExistingDeployFile(target, ScanSession.Manifest, fs);
+        if (kind == DeployPathKind.ToolArtifact)
+        {
+            c.LoadProbe = LoadProbeResult.Skipped;
+            c.Notes.Add($"Load probe skipped: the writable position holds a previous DLLHijackHunter artifact ({why}).");
+            ScanSession.AddResidue(new ResidueEntry
+            {
+                Path = target, Role = ArtifactRole.Canary, Sha256 = fs.Sha256(target), CandidateId = c.Id,
+                Holder = fs.FindLockHolders(target),
+                Reason = $"position holds a previous DLLHijackHunter artifact ({why})"
+            });
+            return false;
+        }
+
         try
         {
-            if (File.Exists(target))
+            if (kind == DeployPathKind.Original)
             {
                 backup = target + ".probebak";
-                File.Copy(target, backup, true);
+                originalHash = fs.Sha256(target);
+                if (!ScanSession.TryRecord(new ArtifactEntry
+                    { Path = backup, Role = ArtifactRole.Backup, Sha256 = originalHash, CandidateId = c.Id, RestoreTo = target }, out var e1))
+                    ScanLogger.Warn($"Load probe backup {backup} not recorded in the artifact manifest: {e1}");
+                fs.Copy(target, backup, true);
+                Act("file-backed-up", target, "-> " + backup);
             }
 
-            File.Copy(probeDll, target, true);
+            if (!ScanSession.TryRecord(new ArtifactEntry
+                { Path = target, Role = ArtifactRole.Canary, Sha256 = probeHash, CandidateId = c.Id }, out var e2))
+                ScanLogger.Warn($"Load probe {target} not recorded in the artifact manifest: {e2}");
+            fs.Copy(probeDll, target, true);
             placed = true;
+            Act("file-planted", target, "load probe");
 
             // Choose the model that matches where the writable position sits:
             //  • the target's own directory → "appdir" (app dir precedes System32). The old
@@ -288,15 +319,43 @@ public static class LoadProbe
         }
         finally
         {
-            // Remove the probe and restore any original file.
-            try { if (placed && File.Exists(target)) File.Delete(target); }
-            catch { c.Notes.Add("Warning: load probe DLL could not be removed (file may be locked)."); }
-
-            if (backup != null && File.Exists(backup))
+            // Remove the probe (only if it is still our probe) and restore any original file.
+            bool probeGone = true;
+            if (placed)
             {
-                try { File.Move(backup, target, true); }
-                catch { c.Notes.Add("Warning: original DLL could not be restored after load probe — manual cleanup may be required."); }
+                if (string.Equals(fs.Sha256(target), probeHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    var r = ArtifactCleaner.RemoveAsync(target, ArtifactRole.Canary, probeHash, c.Id, fs, null,
+                        null, Act).GetAwaiter().GetResult();
+                    if (r == null) ScanSession.Forget(target);
+                    else
+                    {
+                        probeGone = false;
+                        ScanSession.AddResidue(r);
+                        c.Notes.Add("Warning: load probe DLL could not be removed (file may be locked); recorded as residue.");
+                    }
+                }
+                else ScanSession.Forget(target);
             }
+
+            if (backup != null && fs.Exists(backup))
+            {
+                ResidueEntry? r = probeGone
+                    ? ArtifactCleaner.RestoreAsync(backup, target, originalHash, c.Id, fs, null, null, Act).GetAwaiter().GetResult()
+                    : new ResidueEntry
+                    {
+                        Path = backup, Role = ArtifactRole.Backup, Sha256 = originalHash, CandidateId = c.Id,
+                        DelayedDeleteScheduled = fs.ScheduleMoveOnReboot(backup, target),
+                        Reason = $"original could not be restored to {target}: the probe there is still locked"
+                    };
+                if (r == null) ScanSession.Forget(backup);
+                else
+                {
+                    ScanSession.AddResidue(r);
+                    c.Notes.Add("Warning: original DLL could not be restored after load probe; recorded as residue.");
+                }
+            }
+            else if (backup != null) ScanSession.Forget(backup);
 
             // The probe is the canary build; loading it in the child writes a confirm file. Clean it.
             try { File.Delete(CanaryDllBuilder.GetConfirmPath(target)); } catch { }

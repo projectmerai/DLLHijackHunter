@@ -52,6 +52,7 @@ public static class CanaryDllBuilder
                         out var proxyBytes))
                 {
                     File.WriteAllBytes(canaryDllPath, proxyBytes);
+                    RecordBuild(canaryDllPath);
                     return new CanaryDllInfo
                     {
                         CanaryId = canaryId,
@@ -69,6 +70,7 @@ public static class CanaryDllBuilder
         // 2) Default: precompiled, self-locating canary embedded for the victim's bitness.
         if (TryExtractPrecompiled(is64Bit, canaryDllPath))
         {
+            RecordBuild(canaryDllPath);
             return new CanaryDllInfo
             {
                 CanaryId = canaryId,
@@ -406,6 +408,20 @@ public static class CanaryDllBuilder
         return null;
     }
 
+    /// <summary>Record a canary build in the tool folder in the artifact manifest.</summary>
+    internal static void RecordBuild(string path)
+    {
+        if (!ScanSession.TryRecord(new ArtifactEntry
+            { Path = path, Role = Models.ArtifactRole.Canary, Sha256 = ArtifactHash.OfFile(path) }, out var err))
+            ScanLogger.Debug($"[Canary] build {path} not recorded in the artifact manifest: {err}");
+    }
+
+    private static void DeleteAndForget(string file)
+    {
+        try { File.Delete(file); } catch { }
+        if (!File.Exists(file)) ScanSession.Forget(file);
+    }
+
     public static void Cleanup(string canaryId)
     {
         try
@@ -416,9 +432,7 @@ public static class CanaryDllBuilder
             foreach (var pattern in patterns)
             {
                 foreach (var file in Directory.GetFiles(CanaryDir, pattern))
-                {
-                    try { File.Delete(file); } catch { }
-                }
+                    DeleteAndForget(file);
             }
         }
         catch { }
@@ -431,26 +445,27 @@ public static class CanaryDllBuilder
             if (Directory.Exists(CanaryDir))
             {
                 foreach (var file in Directory.GetFiles(CanaryDir, "canary_*"))
-                {
-                    try { File.Delete(file); } catch { }
-                }
+                    DeleteAndForget(file);
                 foreach (var file in Directory.GetFiles(CanaryDir, "*.confirm"))
-                {
-                    try { File.Delete(file); } catch { }
-                }
+                    DeleteAndForget(file);
                 // Clean up MSVC compilation artifacts
                 foreach (var ext in new[] { "*.obj", "*.lib", "*.exp", "*.pdb" })
                 {
                     foreach (var file in Directory.GetFiles(CanaryDir, ext))
-                    {
-                        try { File.Delete(file); } catch { }
-                    }
+                        DeleteAndForget(file);
                 }
 
                 // Remove the shared load-probe DLL (extracted once from embedded resources,
                 // cached across scans, never deleted until an explicit CleanupAll call).
-                try { File.Delete(Path.Combine(CanaryDir, "loadprobe.dll")); } catch { }
+                DeleteAndForget(Path.Combine(CanaryDir, "loadprobe.dll"));
             }
+
+            // Manifest entries for the tool's own temp files whose file is gone (deleted above
+            // or earlier) are cleared too. Entries for files still present stay: they are residue.
+            var m = ScanSession.Manifest;
+            if (m != null)
+                foreach (var e in m.Entries.Where(e => ArtifactPaths.IsUnderToolFolder(e.Path) && !File.Exists(e.Path)))
+                    ScanSession.Forget(e.Path);
         }
         catch { }
     }

@@ -114,6 +114,44 @@ public class CanaryEngine
                 }
             }
 
+            var fs = ScanSession.Files;
+            var manifest = ScanSession.Manifest;
+            string deploy = candidate.HijackWritablePath;
+            void Act(string action, string target, string result) =>
+                Audit.Record(canaryId, candidate, action, target, result);
+
+            // Every file the canary places is recorded in the artifact manifest first. Without
+            // a manifest nothing could be swept after a crash, so the canary does not run.
+            if (manifest == null || !manifest.Trusted)
+            {
+                candidate.CanaryResult = CanaryResult.NotTested;
+                candidate.Notes.Add("Canary not run: the artifact manifest is unavailable, so placed files " +
+                    "could not be tracked." + (manifest?.LoadProblem is string p ? $" ({p})" : ""));
+                return;
+            }
+
+            // Never treat a DLLHijackHunter artifact at the deploy path as the original: don't
+            // back it up, proxy it or restore it. Report it as residue instead.
+            var (deployKind, artifactWhy) = ClassifyExistingDeployFile(deploy, manifest, fs);
+            if (deployKind == DeployPathKind.ToolArtifact)
+            {
+                candidate.CanaryResult = CanaryResult.NotTested;
+                candidate.Notes.Add("Canary not run: deploy path holds a previous DLLHijackHunter artifact " +
+                    $"({artifactWhy}). It was not proxied or backed up; it is reported as residue.");
+                Act("file-inspect", deploy, "previous-artifact: " + artifactWhy);
+                ScanSession.AddResidue(new ResidueEntry
+                {
+                    Path = deploy,
+                    Role = ArtifactRole.Canary,
+                    Sha256 = fs.Sha256(deploy),
+                    Holder = fs.FindLockHolders(deploy),
+                    CandidateId = candidate.Id,
+                    Reason = $"deploy path holds a previous DLLHijackHunter artifact ({artifactWhy})"
+                });
+                return;
+            }
+            bool hadExistingDll = deployKind == DeployPathKind.Original;
+
             // Determine architecture
             bool is64Bit = true;
             try
@@ -129,14 +167,16 @@ public class CanaryEngine
             // them at load time (a static import) keeps resolving after we deploy the canary.
             // Prefer the DLL already sitting at the deploy path; else the known legit copy. If
             // neither exports anything it is a true phantom — the export-less canary is correct.
+            // A tool artifact is never an original.
             string? originalForProxy = null;
             try
             {
-                if (File.Exists(candidate.HijackWritablePath) &&
-                    PEAnalyzer.GetExportEntries(candidate.HijackWritablePath).Count > 0)
-                    originalForProxy = candidate.HijackWritablePath;
+                if (hadExistingDll && PEAnalyzer.GetExportEntries(deploy).Count > 0)
+                    originalForProxy = deploy;
                 else if (!string.IsNullOrEmpty(candidate.DllLegitPath) &&
                          File.Exists(candidate.DllLegitPath!) &&
+                         !ArtifactPaths.IsToolArtifact(candidate.DllLegitPath!, manifest) &&
+                         !CanaryMarker.FileHasMarker(candidate.DllLegitPath!) &&
                          PEAnalyzer.GetExportEntries(candidate.DllLegitPath!).Count > 0)
                     originalForProxy = candidate.DllLegitPath;
             }
@@ -151,7 +191,7 @@ public class CanaryEngine
                 candidate.DllName,
                 originalForProxy,
                 is64Bit,
-                candidate.HijackWritablePath
+                deploy
             );
 
             if (canaryInfo.IsProxy)
@@ -174,22 +214,27 @@ public class CanaryEngine
                 candidate.Notes.Add("Could not obtain a canary DLL (embedded precompiled canary missing and no MSVC toolchain available).");
                 return;
             }
+            string canaryHash = ArtifactHash.OfFile(canaryInfo.DllPath) ?? "";
 
             // Clear any stale confirmation file at the derived path so a previous run cannot be
             // mistaken for this one.
             try
             {
                 if (File.Exists(canaryInfo.ConfirmPath))
+                {
                     File.Delete(canaryInfo.ConfirmPath);
+                    Act("file-deleted", canaryInfo.ConfirmPath, "stale confirmation");
+                }
             }
             catch
             {
             }
 
-            // Backup existing DLL if present
             string? backupPath = null;
             string? sidecarPath = null;   // proxy forward target, staged before deploy
-            bool hadExistingDll = File.Exists(candidate.HijackWritablePath);
+            string? sidecarHash = null;
+            string? originalHash = hadExistingDll ? fs.Sha256(deploy) : null;
+            bool deployAttempted = false;
 
             // Record initial service state
             bool serviceWasRunning = false;
@@ -210,25 +255,42 @@ public class CanaryEngine
                 await Task.Delay(1500); // allow the service process to exit and unload the DLL
             }
 
-            if (hadExistingDll)
-            {
-                backupPath = candidate.HijackWritablePath + ".hijackhunter.bak";
-                try
-                {
-                    File.Copy(candidate.HijackWritablePath, backupPath, true);
-                }
-                catch (Exception ex)
-                {
-                    candidate.CanaryResult = CanaryResult.Failed;
-                    candidate.Notes.Add($"Could not backup existing DLL: {ex.Message}");
-                    return;
-                }
-            }
+            // Stop the trigger again before retrying a locked delete (guard-checked for services).
+            Func<Task> stopAgain = () => TriggerExecutor.StopTriggerAsync(candidate, canaryId);
 
             try
             {
+                // Backup existing DLL if present
+                if (hadExistingDll)
+                {
+                    backupPath = deploy + ".hijackhunter.bak";
+                    if (!ScanSession.TryRecord(new ArtifactEntry
+                        {
+                            Path = backupPath, Role = ArtifactRole.Backup, Sha256 = originalHash,
+                            CandidateId = candidate.Id, RestoreTo = deploy
+                        }, out string? recErr))
+                    {
+                        backupPath = null;
+                        FailHarness(candidate, CanaryFailureCauses.CouldNotBackUp,
+                            $"Could not backup existing DLL: artifact manifest not writable ({recErr})");
+                        return;
+                    }
+                    try
+                    {
+                        fs.Copy(deploy, backupPath, true);
+                        Act("file-backed-up", deploy, "-> " + backupPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!fs.Exists(backupPath)) ScanSession.Forget(backupPath);
+                        backupPath = null;
+                        FailHarness(candidate, CanaryFailureCauses.CouldNotBackUp, $"Could not backup existing DLL: {ex.Message}");
+                        return;
+                    }
+                }
+
                 // Ensure target directory exists
-                string? targetDir = Path.GetDirectoryName(candidate.HijackWritablePath);
+                string? targetDir = Path.GetDirectoryName(deploy);
                 if (targetDir != null && !Directory.Exists(targetDir))
                 {
                     // For .local hijacks, create the .local directory
@@ -237,18 +299,17 @@ public class CanaryEngine
                         try
                         {
                             Directory.CreateDirectory(targetDir);
+                            Act("directory-created", targetDir, "ok");
                         }
                         catch
                         {
-                            candidate.CanaryResult = CanaryResult.Failed;
-                            candidate.Notes.Add("Could not create .local directory");
+                            FailHarness(candidate, CanaryFailureCauses.TargetDirectoryMissing, "Could not create .local directory");
                             return;
                         }
                     }
                     else
                     {
-                        candidate.CanaryResult = CanaryResult.Failed;
-                        candidate.Notes.Add("Target directory does not exist");
+                        FailHarness(candidate, CanaryFailureCauses.TargetDirectoryMissing, "Target directory does not exist");
                         return;
                     }
                 }
@@ -259,21 +320,63 @@ public class CanaryEngine
                 // which overwrites the original at HijackWritablePath.
                 if (canaryInfo.IsProxy && originalForProxy != null)
                 {
-                    sidecarPath = CanaryDllBuilder.GetSidecarPath(candidate.HijackWritablePath);
+                    string sc = CanaryDllBuilder.GetSidecarPath(deploy);
+                    if (fs.Exists(sc))
+                    {
+                        // Only a sidecar this tool recorded may be replaced; anything else stays.
+                        var se = manifest.Find(sc);
+                        string? cur = fs.Sha256(sc);
+                        if (se == null || !string.Equals(se.Sha256, cur, StringComparison.OrdinalIgnoreCase))
+                        {
+                            FailHarness(candidate, CanaryFailureCauses.CouldNotStageSidecar,
+                                $"Could not stage proxy sidecar: {sc} is occupied by a file DLLHijackHunter did not record; not overwritten");
+                            return;
+                        }
+                        var left = await ArtifactCleaner.RemoveAsync(sc, ArtifactRole.Sidecar, cur, candidate.Id, fs, null, null, Act);
+                        if (left != null)
+                        {
+                            ScanSession.AddResidue(left);
+                            FailHarness(candidate, CanaryFailureCauses.CouldNotStageSidecar,
+                                $"Could not stage proxy sidecar: a previous sidecar at {sc} could not be removed");
+                            return;
+                        }
+                        ScanSession.Forget(sc);
+                    }
+
+                    sidecarHash = fs.Sha256(originalForProxy);
+                    if (!ScanSession.TryRecord(new ArtifactEntry
+                        { Path = sc, Role = ArtifactRole.Sidecar, Sha256 = sidecarHash, CandidateId = candidate.Id }, out string? scErr))
+                    {
+                        FailHarness(candidate, CanaryFailureCauses.CouldNotStageSidecar,
+                            $"Could not stage proxy sidecar: artifact manifest not writable ({scErr})");
+                        return;
+                    }
+                    sidecarPath = sc;
                     try
                     {
-                        File.Copy(originalForProxy, sidecarPath, true);
+                        fs.Copy(originalForProxy, sc, true);
+                        Act("file-planted", sc, "sidecar copy of " + originalForProxy);
                     }
                     catch (Exception ex)
                     {
-                        candidate.CanaryResult = CanaryResult.Failed;
-                        candidate.Notes.Add($"Could not stage proxy sidecar: {ex.Message}");
+                        FailHarness(candidate, CanaryFailureCauses.CouldNotStageSidecar, $"Could not stage proxy sidecar: {ex.Message}");
                         return;
                     }
                 }
 
-                // Deploy canary DLL
-                File.Copy(canaryInfo.DllPath, candidate.HijackWritablePath, true);
+                // Deploy canary DLL (recorded first, with the confirm file it will write).
+                if (!ScanSession.TryRecord(new ArtifactEntry
+                        { Path = canaryInfo.ConfirmPath, Role = ArtifactRole.Confirm, CandidateId = candidate.Id }, out _) ||
+                    !ScanSession.TryRecord(new ArtifactEntry
+                        { Path = deploy, Role = ArtifactRole.Canary, Sha256 = canaryHash, CandidateId = candidate.Id }, out string? depErr))
+                {
+                    candidate.CanaryResult = CanaryResult.NotTested;
+                    candidate.Notes.Add("Canary not run: artifact manifest not writable, the canary would be untracked.");
+                    return;
+                }
+                deployAttempted = true;
+                fs.Copy(canaryInfo.DllPath, deploy, true);
+                Act("file-planted", deploy, canaryInfo.IsProxy ? "proxy canary" : "precompiled canary");
 
                 // Trigger execution
                 bool triggered = await TriggerExecutor.TriggerAsync(
@@ -282,8 +385,7 @@ public class CanaryEngine
                 // If execution could not be triggered at all, fail immediately.
                 if (!triggered)
                 {
-                    candidate.CanaryResult = CanaryResult.Failed;
-                    candidate.Notes.Add("Could not trigger execution context " +
+                    FailHarness(candidate, CanaryFailureCauses.CouldNotTrigger, "Could not trigger execution context " +
                         "(service may be running, access denied, or dependency chain issue)");
                 }
                 else
@@ -308,7 +410,7 @@ public class CanaryEngine
                         }
                     }
 
-                    if (candidate.CanaryResult != CanaryResult.Fired && !File.Exists(candidate.HijackWritablePath))
+                    if (candidate.CanaryResult != CanaryResult.Fired && !File.Exists(deploy))
                     {
                         // The canary vanished from the deploy location: real-time antivirus
                         // quarantined it. That says nothing about the hijack itself.
@@ -341,47 +443,99 @@ public class CanaryEngine
                 if (candidate.Trigger == TriggerType.Service)
                     await ServiceControl.StopAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
 
-                // Cleanup: remove canary DLL
-                try
+                // Cleanup: remove the canary, but only if what sits there is still our canary.
+                bool canaryGone = true;
+                if (deployAttempted)
                 {
-                    if (File.Exists(candidate.HijackWritablePath))
-                        File.Delete(candidate.HijackWritablePath);
-                }
-                catch
-                {
-                    candidate.Notes.Add("Warning: Could not remove canary DLL — file may be locked");
+                    string? cur = fs.Sha256(deploy);
+                    if (cur != null && string.Equals(cur, canaryHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var r = await ArtifactCleaner.RemoveAsync(deploy, ArtifactRole.Canary, canaryHash,
+                            candidate.Id, fs, stopAgain, null, Act);
+                        if (r == null) ScanSession.Forget(deploy);
+                        else
+                        {
+                            canaryGone = false;
+                            ScanSession.AddResidue(r);
+                            candidate.Notes.Add("Warning: Could not remove canary DLL — file may be locked. " + DescribeResidue(r));
+                        }
+                    }
+                    else
+                    {
+                        // Gone already (antivirus), or the deploy copy never replaced the original.
+                        ScanSession.Forget(deploy);
+                    }
                 }
 
                 // Restore backup
-                if (backupPath != null && File.Exists(backupPath))
+                if (backupPath != null && fs.Exists(backupPath))
                 {
-                    try
+                    ResidueEntry? r;
+                    if (canaryGone)
+                        r = await ArtifactCleaner.RestoreAsync(backupPath, deploy, originalHash, candidate.Id, fs,
+                            stopAgain, null, Act);
+                    else
                     {
-                        File.Move(backupPath, candidate.HijackWritablePath, true);
+                        // The canary is still there (delete scheduled for reboot): schedule the
+                        // original to be moved back after it, at the same reboot.
+                        bool s = false;
+                        try { s = fs.ScheduleMoveOnReboot(backupPath, deploy); } catch { }
+                        Act("file-restore-delayed", deploy, s ? "scheduled for next reboot" : "could not schedule");
+                        r = new ResidueEntry
+                        {
+                            Path = backupPath, Role = ArtifactRole.Backup, Sha256 = originalHash, CandidateId = candidate.Id,
+                            DelayedDeleteScheduled = s, Holder = fs.FindLockHolders(deploy),
+                            Reason = $"original could not be restored to {deploy}: the canary there is still locked"
+                        };
                     }
-                    catch
+
+                    if (r == null && string.Equals(fs.Sha256(deploy), originalHash, StringComparison.OrdinalIgnoreCase))
+                        ScanSession.Forget(backupPath);
+                    else if (r != null)
                     {
-                        candidate.Notes.Add("Warning: Could not restore original DLL from backup - file may be locked by a lingering process. Manual cleanup may be required.");
+                        ScanSession.AddResidue(r);
+                        candidate.Notes.Add("Warning: Could not restore original DLL from backup - file may be locked by a lingering process. " +
+                            DescribeResidue(r));
                     }
+                }
+                else if (backupPath != null)
+                {
+                    ScanSession.Forget(backupPath);
                 }
 
                 // Remove the proxy sidecar (forward target) if we staged one.
-                if (sidecarPath != null && File.Exists(sidecarPath))
+                if (sidecarPath != null)
                 {
-                    try
+                    if (fs.Exists(sidecarPath))
                     {
-                        File.Delete(sidecarPath);
+                        var r = await ArtifactCleaner.RemoveAsync(sidecarPath, ArtifactRole.Sidecar, sidecarHash,
+                            candidate.Id, fs, stopAgain, null, Act);
+                        if (r == null) ScanSession.Forget(sidecarPath);
+                        else
+                        {
+                            ScanSession.AddResidue(r);
+                            candidate.Notes.Add("Warning: Could not remove proxy sidecar — file may be locked. " + DescribeResidue(r));
+                        }
                     }
-                    catch
-                    {
-                        candidate.Notes.Add("Warning: Could not remove proxy sidecar — file may be locked. Manual cleanup may be required.");
-                    }
+                    else ScanSession.Forget(sidecarPath);
                 }
+
+                // The confirmation file (in the tool's own folder).
+                try
+                {
+                    if (File.Exists(canaryInfo.ConfirmPath))
+                    {
+                        File.Delete(canaryInfo.ConfirmPath);
+                        Act("file-deleted", canaryInfo.ConfirmPath, "confirmation");
+                    }
+                    if (!File.Exists(canaryInfo.ConfirmPath)) ScanSession.Forget(canaryInfo.ConfirmPath);
+                }
+                catch { }
 
                 // Clean up .local directory if we created it
                 if (candidate.Type == HijackType.DotLocal)
                 {
-                    string? dotLocalDir = Path.GetDirectoryName(candidate.HijackWritablePath);
+                    string? dotLocalDir = Path.GetDirectoryName(deploy);
                     if (dotLocalDir != null)
                     {
                         try
@@ -390,6 +544,7 @@ public class CanaryEngine
                                 !Directory.EnumerateFileSystemEntries(dotLocalDir).Any())
                             {
                                 Directory.Delete(dotLocalDir);
+                                Act("directory-deleted", dotLocalDir, "ok");
                             }
                         }
                         catch
@@ -413,12 +568,44 @@ public class CanaryEngine
     }
 
     /// <summary>
-    /// What sits at a canary deploy path before the canary is placed. 9c91eab treated any
-    /// existing file as the original DLL.
+    /// Failed because of the harness, not the hijack: no scoring penalty (see TieredScorer).
+    /// </summary>
+    private static void FailHarness(HijackCandidate candidate, string cause, string note)
+    {
+        candidate.CanaryResult = CanaryResult.Failed;
+        candidate.CanaryFailureCause = cause;
+        candidate.Notes.Add(note);
+    }
+
+    private static string DescribeResidue(ResidueEntry r) =>
+        "Recorded as residue" +
+        (r.Holder != null ? $"; held by {r.Holder}" : "") +
+        (r.DelayedDeleteScheduled ? "; scheduled for removal at next reboot." : "; NOT scheduled — manual cleanup required.");
+
+    /// <summary>
+    /// What sits at a canary deploy path before the canary is placed. A file the tool wrote
+    /// (listed in the manifest with the same hash, or carrying the canary marker) is never an
+    /// "original": it must not be backed up, proxied or restored.
     /// </summary>
     internal static (DeployPathKind kind, string reason) ClassifyExistingDeployFile(string path,
-        ArtifactManifest? manifest, IFileOps fs) =>
-        fs.Exists(path) ? (DeployPathKind.Original, "") : (DeployPathKind.Absent, "");
+        ArtifactManifest? manifest, IFileOps fs)
+    {
+        if (!fs.Exists(path)) return (DeployPathKind.Absent, "");
+
+        string? hash = fs.Sha256(path);
+        var entry = manifest?.Find(path);
+        if (entry != null && hash != null &&
+            string.Equals(entry.Sha256, hash, StringComparison.OrdinalIgnoreCase))
+            return (DeployPathKind.ToolArtifact,
+                $"listed in the artifact manifest as a {entry.Role} from scan {entry.ScanId}");
+        if (hash != null && manifest != null &&
+            manifest.Entries.FirstOrDefault(e => string.Equals(e.Sha256, hash, StringComparison.OrdinalIgnoreCase))
+                is ArtifactEntry copy && copy.Role != ArtifactRole.Backup && copy.Role != ArtifactRole.Sidecar)
+            return (DeployPathKind.ToolArtifact, $"same content as artifact {copy.Path} from scan {copy.ScanId}");
+        if (CanaryMarker.FileHasMarker(path))
+            return (DeployPathKind.ToolArtifact, "carries the DLLHijackHunter canary marker");
+        return (DeployPathKind.Original, "");
+    }
 
     /// <summary>
     /// COM objects whose code runs in (or as) the activating client: InprocServer32 ("VARIES")

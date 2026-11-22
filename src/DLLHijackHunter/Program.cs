@@ -2,6 +2,7 @@ using DLLHijackHunter.Models;
 using DLLHijackHunter.Discovery;
 using DLLHijackHunter.Filters;
 using DLLHijackHunter.Canary;
+using DLLHijackHunter.Safety;
 using DLLHijackHunter.Scoring;
 using DLLHijackHunter.Reporting;
 using DLLHijackHunter.Verification;
@@ -38,8 +39,15 @@ public class Program
     internal static string RepairTrailingBackslashQuotes(string commandLine) =>
         System.Text.RegularExpressions.Regex.Replace(commandLine, @"(?<!\\)\\""(?=\s|$)", @"\\""");
 
-    /// <summary>Process exit code for a finished run. 9c91eab: residue did not affect it.</summary>
-    internal static int ComputeExitCode(int baseCode, int residueCount) => baseCode;
+    /// <summary>Exit code 4: the scan completed, but artifacts could not be removed.</summary>
+    internal const int ExitResidue = 4;
+
+    /// <summary>
+    /// Process exit code for a run. Residue (4) takes precedence over success (0) but never over
+    /// an unhandled error (1) or a refused --confirmed-only run (3).
+    /// </summary>
+    internal static int ComputeExitCode(int baseCode, int residueCount) =>
+        baseCode == 0 && residueCount > 0 ? ExitResidue : baseCode;
 
     [System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true,
         CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
@@ -251,14 +259,14 @@ public class Program
                 AnsiConsole.MarkupLine("\n[yellow]Cancellation requested... cleaning up.[/]");
             };
 
-            await RunScan(profile, output, format, minConf, noCanary, noEtw,
+            ctx.ExitCode = await RunScan(profile, output, format, minConf, noCanary, noEtw,
                 confirmedOnly, verbose, target, lpeOnly, logFile, verifyLoad, canarySettle, cts.Token);
         });
 
         return await rootCommand.InvokeAsync(args);
     }
 
-    private static async Task RunScan(string profileName, string? outputPath, string format,
+    private static async Task<int> RunScan(string profileName, string? outputPath, string format,
         double? minConfidence, bool noCanary, bool noEtw, bool confirmedOnly, bool verbose,
         string? target, bool lpeOnly, string? logFile, bool verifyLoad, int canarySettle,
         CancellationToken cancellationToken)
@@ -331,7 +339,23 @@ public class Program
             ScanLogger.Error($"Confirmed-only mode aborted: {why}");
             ScanLogger.Dispose();
             Environment.Exit(3);
-            return;
+            return 3;
+        }
+
+        // ─── Artifact manifest + startup sweep (before discovery) ───
+        // Leftovers from a previous run are removed only when their hash matches what that
+        // run wrote; recorded backups are restored. Everything is reported.
+        ScanSession.Begin();
+        if (ScanSession.Sweep.Count > 0)
+        {
+            AnsiConsole.MarkupLine($"[yellow]Startup sweep: {ScanSession.Sweep.Count} artifact(s) left by a previous run:[/]");
+            foreach (var s in ScanSession.Sweep)
+                AnsiConsole.MarkupLine($"[yellow]  {Markup.Escape(s.Outcome)}: {Markup.Escape(s.Path)} ({s.Role})" +
+                    (s.Detail.Length > 0 ? $" — {Markup.Escape(s.Detail)}" : "") + "[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[dim]Startup sweep: no artifacts left by a previous run.[/]");
         }
 
         AnsiConsole.MarkupLine($"[bold]Profile:[/] {profile.Name}");
@@ -430,7 +454,7 @@ public class Program
 
             AnsiConsole.MarkupLine($"\n[bold green]Scan complete in {stopwatch.Elapsed:mm\\:ss}[/]");
             AnsiConsole.MarkupLine("[bold]Findings: 0[/] (no candidates discovered)");
-            return;
+            return FinishRun();
         }
 
         // ═══════════════════════════════════════════════
@@ -464,7 +488,7 @@ public class Program
 
             AnsiConsole.MarkupLine($"\n[bold green]Scan complete in {stopwatch.Elapsed:mm\\:ss}[/]");
             AnsiConsole.MarkupLine("[bold]Findings: 0[/] (all candidates eliminated by filters)");
-            return;
+            return FinishRun();
         }
 
         // ═══════════════════════════════════════════════
@@ -545,6 +569,7 @@ public class Program
             $"[yellow]{scanResult.Medium.Count} medium[/] | " +
             $"[grey]{scanResult.Low.Count} low[/]" +
             (scanResult.Informational.Count > 0 ? $" | [dim]{scanResult.Informational.Count} info[/]" : "") + ")");
+        return FinishRun();
         }
         finally
         {
@@ -552,8 +577,41 @@ public class Program
         }
     }
 
+    /// <summary>End of a completed run: print residue (red) and pick the exit code.</summary>
+    private static int FinishRun()
+    {
+        var residue = ScanSession.Residue;
+        if (residue.Count > 0)
+        {
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[bold red]═══ RESIDUE: files DLLHijackHunter placed and could not remove ═══[/]");
+            foreach (var r in residue)
+            {
+                AnsiConsole.MarkupLine($"[red]  {Markup.Escape(r.Path)}[/] [dim]({r.Role})[/]");
+                AnsiConsole.MarkupLine($"[red]    SHA-256: {Markup.Escape(r.Sha256 ?? "unknown")}[/]");
+                AnsiConsole.MarkupLine($"[red]    Holder: {Markup.Escape(r.Holder ?? "unknown")} | delayed delete at reboot: " +
+                    $"{(r.DelayedDeleteScheduled ? "scheduled" : "NOT scheduled")}[/]");
+                AnsiConsole.MarkupLine($"[red]    {Markup.Escape(r.Reason)}[/]");
+                ScanLogger.Error($"Residue: {r.Path} role={r.Role} sha256={r.Sha256} holder={r.Holder ?? "unknown"} " +
+                    $"delayed={(r.DelayedDeleteScheduled ? "yes" : "no")} candidate={r.CandidateId} reason={r.Reason}");
+            }
+            AnsiConsole.MarkupLine($"[bold red]  Exit code {ExitResidue}: scan completed, but artifacts could not be removed. " +
+                "They are recorded in %ProgramData%\\DLLHijackHunter\\artifacts.json and swept on the next run.[/]");
+        }
+        return ComputeExitCode(0, residue.Count);
+    }
+
+    /// <summary>Copy the run's side-effect accounting into the report.</summary>
+    private static void AttachSideEffects(ScanResult result)
+    {
+        result.ScanId = ScanSession.ScanId;
+        result.Residue = ScanSession.Residue;
+        result.ArtifactSweep = ScanSession.Sweep.ToList();
+    }
+
     private static async Task GenerateOutput(ScanResult scanResult, string format, string? outputPath)
     {
+        AttachSideEffects(scanResult);
         string effectiveFormat = format;
         if (outputPath != null) effectiveFormat = Path.GetExtension(outputPath).ToLowerInvariant() switch { ".json" => "json", ".html" or ".htm" => "html", _ => format };
 

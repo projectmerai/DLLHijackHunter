@@ -70,6 +70,33 @@ public static class TriggerExecutor
         }
     }
 
+    /// <summary>
+    /// Stop the candidate's trigger again so a locked canary can be removed: the service
+    /// (through ServiceControl, so a guarded one is refused) or the scheduled task's running
+    /// instance. Other triggers have nothing to stop.
+    /// </summary>
+    public static async Task StopTriggerAsync(HijackCandidate candidate, string actorId)
+    {
+        switch (candidate.Trigger)
+        {
+            case TriggerType.Service:
+                await ServiceControl.StopAsync(candidate.TriggerIdentifier, 5000, actorId, candidate);
+                break;
+            case TriggerType.ScheduledTask:
+                try
+                {
+                    var (code, _, err) = await RunProcess("schtasks.exe", $"/end /tn \"{candidate.TriggerIdentifier}\"", 10);
+                    Audit.Record(actorId, candidate, "task-end", candidate.TriggerIdentifier,
+                        code == 0 ? "sent" : $"failed: exit {code} {err.Trim()}");
+                }
+                catch (Exception ex)
+                {
+                    Audit.Record(actorId, candidate, "task-end", candidate.TriggerIdentifier, "failed: " + ex.Message);
+                }
+                break;
+        }
+    }
+
     // sc.exe could not be started at all (e.g. blocked by antivirus). A timeout is not a launch
     // failure: as in 9c91eab, the confirm-file poll decides the outcome.
     private static bool IsLaunchFailure((ServiceActionOutcome outcome, string output) r) =>
