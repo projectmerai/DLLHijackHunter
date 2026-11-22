@@ -20,10 +20,10 @@ public static class TriggerExecutor
                     return await TriggerService(candidate, actorId, timeoutSeconds);
 
                 case TriggerType.ScheduledTask:
-                    return await TriggerScheduledTask(candidate.TriggerIdentifier, timeoutSeconds);
+                    return await TriggerScheduledTask(candidate, actorId, timeoutSeconds);
 
                 case TriggerType.COM:
-                    return await TriggerCOM(candidate.TriggerIdentifier, timeoutSeconds);
+                    return await TriggerCOM(candidate, actorId, timeoutSeconds);
 
                 case TriggerType.Startup:
                 case TriggerType.RunKey:
@@ -102,14 +102,17 @@ public static class TriggerExecutor
     private static bool IsLaunchFailure((ServiceActionOutcome outcome, string output) r) =>
         r.outcome == ServiceActionOutcome.Failed && r.output != "sc.exe timed out";
 
-    private static async Task<bool> TriggerScheduledTask(string taskPath, int timeoutSeconds)
+    private static async Task<bool> TriggerScheduledTask(HijackCandidate candidate, string actorId, int timeoutSeconds)
     {
+        string taskPath = candidate.TriggerIdentifier;
         try
         {
-            var (exitCode, _, _) = await RunProcess(
+            var (exitCode, _, stderr) = await RunProcess(
                 "schtasks.exe",
                 $"/run /tn \"{taskPath}\"",
                 timeoutSeconds);
+            Audit.Record(actorId, candidate, "task-run", taskPath,
+                exitCode == 0 ? "sent" : $"failed: exit {exitCode} {stderr.Trim()}");
 
             if (exitCode != 0)
                 return false; // schtasks itself failed (task not found, access denied, etc.)
@@ -127,8 +130,9 @@ public static class TriggerExecutor
         }
     }
 
-    private static async Task<bool> TriggerCOM(string clsid, int timeoutSeconds)
+    private static async Task<bool> TriggerCOM(HijackCandidate candidate, string actorId, int timeoutSeconds)
     {
+        string clsid = candidate.TriggerIdentifier;
         try
         {
             // Use PowerShell to instantiate the COM object
@@ -139,12 +143,15 @@ public static class TriggerExecutor
                 "powershell.exe",
                 $"-NoProfile -Command \"{psCommand}\"",
                 timeoutSeconds);
+            Audit.Record(actorId, candidate, "com-activation", clsid,
+                exitCode == 0 ? "activated" : $"failed: exit {exitCode}");
 
             await Task.Delay(2000);
             return exitCode == 0;
         }
-        catch
+        catch (Exception ex)
         {
+            Audit.Record(actorId, candidate, "com-activation", clsid, "failed: " + ex.Message);
             return false;
         }
     }

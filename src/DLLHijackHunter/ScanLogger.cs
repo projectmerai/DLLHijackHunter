@@ -58,6 +58,12 @@ public static class ScanLogger
         WriteToFile("DEBUG", message);
     }
 
+    /// <summary>
+    /// Side-effect audit line: always written to the log file at Info level (independent of
+    /// --verbose), never to the console.
+    /// </summary>
+    public static void Audit(string message) => WriteToFile("INFO", message);
+
     public static void Status(string message)
     {
         AnsiConsole.MarkupLine(message);
