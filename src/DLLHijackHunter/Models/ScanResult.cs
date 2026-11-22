@@ -32,4 +32,12 @@ public class ScanResult
 
     // Attack chain analysis
     public List<AttackChain> AttackChains { get; set; } = new();
+
+    // ─── Side-effect accounting ───
+    // Identifier of this run, recorded in every artifact-manifest entry it writes.
+    public string ScanId { get; set; } = "";
+    // Files this run (or a previous one) placed and could not remove. Non-empty => exit code 4.
+    public List<ResidueEntry> Residue { get; set; } = new();
+    // What the startup sweep did with manifest entries left by a previous run.
+    public List<SweepItem> ArtifactSweep { get; set; } = new();
 }
