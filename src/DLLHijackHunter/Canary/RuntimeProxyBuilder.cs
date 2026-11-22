@@ -165,6 +165,10 @@ public static class RuntimeProxyBuilder
 
         uint moduleNameRva = AddString(forwardModuleBase + ".dll");
 
+        // Deterministic marker so a proxy left behind is recognised as a DLLHijackHunter artifact
+        // (CanaryMarker.ProxyString). Not referenced by any table; the loader ignores it.
+        AddString(CanaryMarker.ProxyString);
+
         // One forwarder string per ordinal slot (dedup by ordinal).
         var forwarderRvaByOrdinal = new Dictionary<ushort, uint>();
         foreach (var e in exports)
