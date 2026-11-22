@@ -1,0 +1,30 @@
+{
+  "_comment": "Third-party EDR/AV service names the tool must never stop or restart. Add an entry only with a public vendor page that names the service; put that URL in 'source'. Microsoft security services are built into ServiceGuard.",
+  "services": [
+    {
+      "name": "CSAgent",
+      "vendor": "CrowdStrike Falcon",
+      "source": "https://crowdstrike.com/wp-content/uploads/2024/07/Repairing-Falcon-Windows-Sensors.pdf"
+    },
+    {
+      "name": "CSFalconService",
+      "vendor": "CrowdStrike Falcon",
+      "source": "https://crowdstrike.com/wp-content/uploads/2024/07/Repairing-Falcon-Windows-Sensors.pdf"
+    },
+    {
+      "name": "ekrn",
+      "vendor": "ESET",
+      "source": "https://help.eset.com/ees/9/en-US/idh_config_diagnostics.html"
+    },
+    {
+      "name": "Elastic Agent",
+      "vendor": "Elastic",
+      "source": "https://www.elastic.co/guide/en/security/current/endpoint-self-protection.html"
+    },
+    {
+      "name": "ElasticEndpoint",
+      "vendor": "Elastic",
+      "source": "https://www.elastic.co/guide/en/security/current/elastic-agent-service-terminated.html"
+    }
+  ]
+}

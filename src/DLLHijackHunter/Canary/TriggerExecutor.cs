@@ -1,4 +1,5 @@
 using DLLHijackHunter.Models;
+using DLLHijackHunter.Safety;
 using System.Diagnostics;
 
 namespace DLLHijackHunter.Canary;
@@ -8,14 +9,15 @@ public static class TriggerExecutor
     /// <summary>
     /// Trigger the execution context so it loads the canary DLL.
     /// </summary>
-    public static async Task<bool> TriggerAsync(HijackCandidate candidate, int timeoutSeconds = 15)
+    public static async Task<bool> TriggerAsync(HijackCandidate candidate, int timeoutSeconds = 15,
+        string actorId = "canary")
     {
         try
         {
             switch (candidate.Trigger)
             {
                 case TriggerType.Service:
-                    return await TriggerService(candidate.TriggerIdentifier, timeoutSeconds);
+                    return await TriggerService(candidate, actorId, timeoutSeconds);
 
                 case TriggerType.ScheduledTask:
                     return await TriggerScheduledTask(candidate.TriggerIdentifier, timeoutSeconds);
@@ -38,13 +40,17 @@ public static class TriggerExecutor
         }
     }
 
-    private static async Task<bool> TriggerService(string serviceName, int timeoutSeconds)
+    private static async Task<bool> TriggerService(HijackCandidate candidate, string actorId, int timeoutSeconds)
     {
+        string serviceName = candidate.TriggerIdentifier;
         try
         {
             // Stop the service (may already be stopped by CanaryEngine's pre-deploy stop, but
             // running it again is harmless — ensures any locked file handle is released).
-            await RunProcess("sc.exe", $"stop \"{serviceName}\"", 10);
+            // ServiceControl refuses guarded services; CanaryEngine never gets here for one.
+            var stop = await ServiceControl.StopAsync(serviceName, 10_000, actorId, candidate);
+            if (stop.outcome == ServiceActionOutcome.RefusedByGuard || IsLaunchFailure(stop))
+                return false;
             await Task.Delay(2000);
 
             // Start the service. Do NOT gate on sc start exit code: a service that loads the
@@ -52,7 +58,8 @@ public static class TriggerExecutor
             // it exits. sc.exe reports that crash as a non-zero exit code, which would make us
             // return false and mark the canary as Failed — even though it actually fired.
             // The poll in CanaryEngine (which checks for the confirm file) is the real oracle.
-            await RunProcess("sc.exe", $"start \"{serviceName}\"", timeoutSeconds);
+            var start = await ServiceControl.StartAsync(serviceName, timeoutSeconds * 1000, actorId, candidate);
+            if (IsLaunchFailure(start)) return false;
             await Task.Delay(3000); // allow DLL to load and DllMain to execute
 
             return true; // trigger sent — CanaryEngine's poll decides the outcome
@@ -62,6 +69,11 @@ public static class TriggerExecutor
             return false;
         }
     }
+
+    // sc.exe could not be started at all (e.g. blocked by antivirus). A timeout is not a launch
+    // failure: as in 9c91eab, the confirm-file poll decides the outcome.
+    private static bool IsLaunchFailure((ServiceActionOutcome outcome, string output) r) =>
+        r.outcome == ServiceActionOutcome.Failed && r.output != "sc.exe timed out";
 
     private static async Task<bool> TriggerScheduledTask(string taskPath, int timeoutSeconds)
     {

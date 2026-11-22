@@ -33,6 +33,8 @@
   <ItemGroup>
     <EmbeddedResource Include="Resources\phantom_dlls.json" />
     <EmbeddedResource Include="Resources\hijacklibs.json" />
+    <!-- Third-party EDR/AV service names the tool never stops, each with its vendor source. -->
+    <EmbeddedResource Include="Resources\security_services.json" />
     <!-- Precompiled self-locating canaries (no compiler needed at scan time) and the
          auditable source they are built from. Rebuild via Resources\build_canary.bat. -->
     <EmbeddedResource Include="Resources\canary_x64.dll" />
