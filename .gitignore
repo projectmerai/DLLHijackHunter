@@ -10,7 +10,6 @@ publish/
 build/
 *.exe
 test_penet/
-tests/
 hijackhunter_*.json
 # scratch scan artifacts
 scan_*.txt

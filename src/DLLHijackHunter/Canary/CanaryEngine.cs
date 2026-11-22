@@ -460,6 +460,14 @@ public class CanaryEngine
     }
 
     /// <summary>
+    /// What sits at a canary deploy path before the canary is placed. 9c91eab treated any
+    /// existing file as the original DLL.
+    /// </summary>
+    internal static (DeployPathKind kind, string reason) ClassifyExistingDeployFile(string path,
+        ArtifactManifest? manifest, IFileOps fs) =>
+        fs.Exists(path) ? (DeployPathKind.Original, "") : (DeployPathKind.Absent, "");
+
+    /// <summary>
     /// COM objects whose code runs in (or as) the activating client: InprocServer32 ("VARIES")
     /// and LocalServer32 without a fixed RunAs identity. A fixed RunAs / LocalService server
     /// is launched by the COM SCM under its configured account, so its canary identity is real.

@@ -6,6 +6,7 @@ using Microsoft.Diagnostics.Tracing.Parsers.Kernel;
 using Microsoft.Diagnostics.Tracing.Session;
 using Spectre.Console;
 using System.Collections.Concurrent;
+using DLLHijackHunter.Safety;
 
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("DLLHijackHunter.Tests")]
 
@@ -17,11 +18,19 @@ public class ETWDiscoveryEngine
     private readonly ConcurrentDictionary<int, DiscoveryContext> _processes = new();
     private readonly ConcurrentBag<HijackCandidate> _candidates = new();
     private readonly ConcurrentDictionary<string, byte> _failedLookups = new();
+    private readonly EtwEnvironment _env;
 
-    public ETWDiscoveryEngine(ScanProfile profile)
+    public ETWDiscoveryEngine(ScanProfile profile) : this(profile, new EtwEnvironment()) { }
+
+    /// <summary>Test seam: every machine query the event handlers make goes through <paramref name="env"/>.</summary>
+    internal ETWDiscoveryEngine(ScanProfile profile, EtwEnvironment env)
     {
         _profile = profile;
+        _env = env;
     }
+
+    /// <summary>Candidates created so far (tests read this instead of running a trace).</summary>
+    internal IReadOnlyList<HijackCandidate> Candidates => _candidates.ToList();
 
     public async Task<List<HijackCandidate>> DiscoverAsync(CancellationToken cancellationToken = default)
     {
@@ -202,18 +211,38 @@ public class ETWDiscoveryEngine
     {
         try
         {
-            // ImageFileName in the kernel event is only the short image name ("svchost.exe"),
-            // not a path. Resolve the full Win32 path from the live process; fall back to the
-            // short name only if the process has already exited.
-            string fullPath = TryGetFullImagePath(data.ProcessID) ?? data.ImageFileName ?? "";
-            var ctx = BuildContext(data.ProcessID, fullPath, data.CommandLine ?? "");
-            ctx.ParentPid = data.ParentID;
-            TrackProcess(ctx);
+            HandleProcessStart(data.ProcessID, data.ParentID, data.ImageFileName ?? "", data.CommandLine ?? "");
         }
         catch (Exception ex)
         {
             ScanLogger.Debug($"ETW ProcessStart handling failed (PID {data.ProcessID}): {ex.Message}");
         }
+    }
+
+    internal void HandleProcessStart(int pid, int parentPid, string imageFileName, string commandLine)
+    {
+        // ImageFileName in the kernel event is only the short image name ("svchost.exe"),
+        // not a path. Resolve the full Win32 path from the live process; fall back to the
+        // short name only if the process has already exited.
+        string fullPath = _env.QueryImagePath(pid) ?? imageFileName;
+        var ctx = BuildContext(pid, fullPath, commandLine);
+        ctx.ParentPid = parentPid;
+        TrackProcess(ctx);
+    }
+
+    /// <summary>Record an already-running process (used by the seed pass and by tests).</summary>
+    internal bool SeedProcess(int pid, int parentPid, string path)
+    {
+        var ctx = BuildContext(pid, path, "");
+        ctx.ParentPid = parentPid;
+        return _processes.TryAdd(pid, ctx);
+    }
+
+    /// <summary>Link seeded processes to their parents once all are known.</summary>
+    internal void LinkSeeded()
+    {
+        foreach (var ctx in _processes.Values)
+            if (ctx.ParentPid > 0) LinkToParent(ctx);
     }
 
     private void SeedRunningProcesses()
@@ -225,11 +254,9 @@ public class ETWDiscoveryEngine
             {
                 using (p)
                 {
-                    string? path = TryGetFullImagePath(p.Id);
+                    string? path = _env.QueryImagePath(p.Id);
                     if (path == null) continue;
-                    var ctx = BuildContext(p.Id, path, "");
-                    ctx.ParentPid = TryGetParentPid(p.Id);
-                    if (_processes.TryAdd(p.Id, ctx))
+                    if (SeedProcess(p.Id, TryGetParentPid(p.Id), path))
                         try { startTimes[p.Id] = p.StartTime; } catch { }
                 }
             }
@@ -255,7 +282,7 @@ public class ETWDiscoveryEngine
         }
     }
 
-    private static DiscoveryContext BuildContext(int pid, string binaryPath, string commandLine)
+    private DiscoveryContext BuildContext(int pid, string binaryPath, string commandLine)
     {
         var ctx = new DiscoveryContext
         {
@@ -266,20 +293,28 @@ public class ETWDiscoveryEngine
             IntegrityLevel = "Unknown"
         };
 
-        // Enrich with token info if possible
-        try
+        // Protected / exited / access denied: identity stays "Unknown" and is filled from
+        // static context data by EnrichWithStaticData where possible.
+        if (_env.QueryToken(pid) is (string user, string integrity))
         {
-            using var proc = System.Diagnostics.Process.GetProcessById(pid);
-            ctx.TokenUser = TokenHelper.GetProcessUser(proc.Handle);
-            ctx.IntegrityLevel = TokenHelper.GetProcessIntegrityLevel(proc.Handle);
-        }
-        catch
-        {
-            // Protected / exited / access denied — identity stays "Unknown" and is filled
-            // from static context data by EnrichWithStaticData where possible.
+            ctx.TokenUser = user;
+            ctx.IntegrityLevel = integrity;
         }
 
         return ctx;
+    }
+
+    internal static (string user, string integrity)? QueryProcessToken(int pid)
+    {
+        try
+        {
+            using var proc = System.Diagnostics.Process.GetProcessById(pid);
+            return (TokenHelper.GetProcessUser(proc.Handle), TokenHelper.GetProcessIntegrityLevel(proc.Handle));
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -307,7 +342,7 @@ public class ETWDiscoveryEngine
         }
     }
 
-    private static string? TryGetFullImagePath(int pid)
+    internal static string? TryGetFullImagePath(int pid)
     {
         IntPtr h = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
         if (h == IntPtr.Zero) return null;
@@ -460,6 +495,7 @@ public class ETWDiscoveryEngine
     private bool? IsBinary64Bit(string binaryPath)
     {
         if (string.IsNullOrEmpty(binaryPath) || !Path.IsPathRooted(binaryPath)) return null;
+        if (_env.Is64Bit != null) return _env.Is64Bit(binaryPath);
         if (_is64BitByBinary.TryGetValue(binaryPath, out bool cached)) return cached;
         try
         {
@@ -478,12 +514,16 @@ public class ETWDiscoveryEngine
 
     private void OnImageLoad(ImageLoadTraceData data)
     {
-        try
+        try { HandleImageLoad(data.ProcessID, data.FileName ?? ""); }
+        catch { }
+    }
+
+    internal void HandleImageLoad(int pid, string fileName)
+    {
         {
-            string fileName = data.FileName ?? "";
             if (!fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) return;
 
-            if (_processes.TryGetValue(data.ProcessID, out var ctx))
+            if (_processes.TryGetValue(pid, out var ctx))
             {
                 // When --target is set, skip processes whose binary (or parent's) is not under the target.
                 if (!MatchesTarget(ctx)) return;
@@ -511,7 +551,7 @@ public class ETWDiscoveryEngine
                     actualDir.StartsWith(winDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                     return;
 
-                if (AclChecker.IsDirectoryWritableByStandardUser(actualDir))
+                if (_env.IsDirWritable(actualDir))
                 {
                     var candidate = new HijackCandidate
                     {
@@ -522,8 +562,8 @@ public class ETWDiscoveryEngine
                         HijackWritablePath = Path.Combine(actualDir, dllName),
                         RunAsAccount = ctx.TokenUser,
                         DiscoverySource = "etw",
-                        Notes = { 
-                            $"DLL loaded from writable directory at runtime (PID {data.ProcessID})",
+                        Notes = {
+                            $"DLL loaded from writable directory at runtime (PID {pid})",
                             "[HEURISTIC] ETW cannot guarantee load priority. Verify search-order precedence manually or via Canary."
                         }
                     };
@@ -532,30 +572,33 @@ public class ETWDiscoveryEngine
                 }
             }
         }
-        catch { }
     }
 
     private void OnFileIOCreate(FileIOCreateTraceData data)
     {
-        try
+        try { HandleFileIOCreate(data.ProcessID, data.FileName ?? ""); }
+        catch { }
+    }
+
+    internal void HandleFileIOCreate(int pid, string fileName)
+    {
         {
-            string fileName = data.FileName ?? "";
             if (!fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) return;
 
-            if (!File.Exists(fileName))
+            if (!_env.FileExists(fileName))
             {
-                string lookupKey = $"{data.ProcessID}|{fileName}";
+                string lookupKey = $"{pid}|{fileName}";
                 if (_failedLookups.TryAdd(lookupKey, 0))
                 {
                     string? dir = Path.GetDirectoryName(fileName);
-                    if (dir != null && Directory.Exists(dir) &&
-                        AclChecker.IsDirectoryWritableByStandardUser(dir))
+                    if (dir != null && _env.DirectoryExists(dir) &&
+                        _env.IsDirWritable(dir))
                     {
                         string dllName = Path.GetFileName(fileName);
                         string processPath = "";
                         string tokenUser = "Unknown";
 
-                        _processes.TryGetValue(data.ProcessID, out var ctx);
+                        _processes.TryGetValue(pid, out var ctx);
                         if (!ShouldAttributeLookup(ctx)) return;
 
                         if (ctx != null)
@@ -576,7 +619,7 @@ public class ETWDiscoveryEngine
                             DiscoverySource = "etw",
                             Notes =
                             {
-                                $"Phantom DLL detected via ETW (PID {data.ProcessID})",
+                                $"Phantom DLL detected via ETW (PID {pid})",
                                 $"Process probed {fileName} but file does not exist",
                                 "[HEURISTIC] ETW cannot guarantee load priority. Verify search-order precedence manually or via Canary."
                             }
@@ -600,7 +643,6 @@ public class ETWDiscoveryEngine
                 }
             }
         }
-        catch { }
     }
 
     private async Task TriggerServices()
@@ -628,39 +670,57 @@ public class ETWDiscoveryEngine
                         running.Add(svc.TriggerIdentifier);
             }
 
-            bool restart = ShouldRestartRunningServices(targetSet, running.Count);
-            if (running.Count > 0 && !restart)
+            var plan = PlanServiceTriggers(services.Select(s => s.TriggerIdentifier), targetSet, running,
+                ServiceControl.Guard, out bool capExceeded);
+            if (capExceeded)
             {
                 AnsiConsole.MarkupLine($"[yellow]  {running.Count} matching services are already running; not restarting " +
                     $"more than {MaxServiceRestarts}. Narrow --target, or stop the service before scanning.[/]");
                 ScanLogger.Debug($"ETW: {running.Count} running target services exceed restart cap {MaxServiceRestarts}; start-only");
             }
 
-            foreach (var svc in services)
+            foreach (var step in plan)
             {
                 try
                 {
-                    if (restart && running.Contains(svc.TriggerIdentifier))
+                    if (step.Stop)
                     {
-                        ScanLogger.Debug($"ETW: restarting running target service '{svc.TriggerIdentifier}' under trace");
-                        AnsiConsole.MarkupLine($"[yellow]  Restarting running service {Markup.Escape(svc.TriggerIdentifier)} " +
+                        ScanLogger.Debug($"ETW: restarting running target service '{step.Service}' under trace");
+                        AnsiConsole.MarkupLine($"[yellow]  Restarting running service {Markup.Escape(step.Service)} " +
                             "so its startup is traced[/]");
-                        await RunScAsync($"stop \"{svc.TriggerIdentifier}\"", 10000);
+                        await RunScAsync($"stop \"{step.Service}\"", 10000);
                         // Wait for STOPPED (sc stop returns at STOP_PENDING) before starting again.
                         for (int i = 0; i < 30; i++)
                         {
-                            string q = await RunScAsync($"query \"{svc.TriggerIdentifier}\"", 5000);
+                            string q = await RunScAsync($"query \"{step.Service}\"", 5000);
                             if (q.Contains("STOPPED", StringComparison.OrdinalIgnoreCase)) break;
                             await Task.Delay(500);
                         }
                     }
 
-                    await RunScAsync($"start \"{svc.TriggerIdentifier}\"", 5000);
+                    if (step.Start)
+                        await RunScAsync($"start \"{step.Service}\"", 5000);
                 }
                 catch { }
             }
         }
         catch { }
+    }
+
+    /// <summary>One service the ETW phase acts on: stop it first (restart) and/or start it.</summary>
+    internal sealed record ServiceTriggerStep(string Service, bool Stop, bool Start, string? Refusal);
+
+    /// <summary>
+    /// What the ETW phase does to each matching auto-start service. Pure: no service is touched.
+    /// </summary>
+    internal static List<ServiceTriggerStep> PlanServiceTriggers(IEnumerable<string> services, bool targetSet,
+        ISet<string> running, Func<string, (bool guarded, string reason)> guard, out bool capExceeded)
+    {
+        bool restart = ShouldRestartRunningServices(targetSet, running.Count);
+        capExceeded = running.Count > 0 && !restart;
+        return services
+            .Select(s => new ServiceTriggerStep(s, restart && running.Contains(s), true, null))
+            .ToList();
     }
 
     /// <summary>Most running services a --target scan will restart; beyond this it only starts.</summary>

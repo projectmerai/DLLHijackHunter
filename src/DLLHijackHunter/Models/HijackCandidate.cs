@@ -73,6 +73,9 @@ public class HijackCandidate
 
     // ─── Identity ───
     public string BinaryPath { get; set; } = "";
+    // Short image name (e.g. "app.exe") when ETW could not resolve the full path. BinaryPath is
+    // then empty, never a bare name. Null when the path is known.
+    public string? BinaryImageName { get; set; }
     public string DllName { get; set; } = "";
     public string? DllLegitPath { get; set; }
 
@@ -106,6 +109,11 @@ public class HijackCandidate
     public string? ConfirmedIntegrityLevel { get; set; }
     public bool? ConfirmedSeDebug { get; set; }
     public bool AppStillFunctional { get; set; } = true;
+    // Why a Failed canary failed when the cause is the harness rather than the hijack
+    // (see CanaryFailureCauses). Null otherwise. A harness cause carries no scoring penalty.
+    public string? CanaryFailureCause { get; set; }
+    // Ordered audit trail of every side effect the canary and its triggers caused for this candidate.
+    public List<CanaryAction> CanaryActions { get; set; } = new();
 
     // ─── Scoring ───
     public ConfidenceTier Tier { get; set; } = ConfidenceTier.Informational;
@@ -127,4 +135,22 @@ public class HijackCandidate
     public override string ToString() =>
         $"[{Tier}] {BinaryPath} → {DllName} ({Type}) via {Trigger} as {RunAsAccount} " +
         $"[Confidence={Confidence:F0}% Impact={ImpactScore:F1}]";
+}
+
+/// <summary>One side effect on the machine, in the order it happened (audit trail).</summary>
+public class CanaryAction
+{
+    public DateTime Utc { get; set; } = DateTime.UtcNow;
+    public string Action { get; set; } = "";
+    public string Target { get; set; } = "";
+    public string Result { get; set; } = "";
+}
+
+/// <summary>Harness causes recorded in <see cref="HijackCandidate.CanaryFailureCause"/>.</summary>
+public static class CanaryFailureCauses
+{
+    public const string CouldNotTrigger = "could-not-trigger";
+    public const string CouldNotBackUp = "could-not-back-up";
+    public const string CouldNotStageSidecar = "could-not-stage-sidecar";
+    public const string TargetDirectoryMissing = "target-directory-missing";
 }

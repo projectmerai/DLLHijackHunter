@@ -38,6 +38,9 @@ public class Program
     internal static string RepairTrailingBackslashQuotes(string commandLine) =>
         System.Text.RegularExpressions.Regex.Replace(commandLine, @"(?<!\\)\\""(?=\s|$)", @"\\""");
 
+    /// <summary>Process exit code for a finished run. 9c91eab: residue did not affect it.</summary>
+    internal static int ComputeExitCode(int baseCode, int residueCount) => baseCode;
+
     [System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true,
         CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
