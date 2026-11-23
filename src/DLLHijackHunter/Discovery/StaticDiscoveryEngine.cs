@@ -332,9 +332,13 @@ public class StaticDiscoveryEngine
         return candidates;
     }
 
-    /// <summary>Whether the loader honours &lt;exe&gt;.local for this binary. TIER 3 rule: no manifest, or DevOverrideEnable=1.</summary>
+    /// <summary>
+    /// Whether the loader honours &lt;exe&gt;.local for this binary: always with DevOverrideEnable=1; otherwise only for an
+    /// EXE without a manifest, and not for a 32-bit (WOW64) EXE on 64-bit Windows. On Windows 11 the loader ignored
+    /// cmk-agent-ctl.exe.local (32-bit, no manifest): an unmodified real secur32.dll placed there was never loaded.
+    /// </summary>
     internal static bool DotLocalHonoured(bool hasManifest, bool binaryIs64Bit, bool osIs64Bit, bool devOverrideEnable) =>
-        !hasManifest || devOverrideEnable;
+        devOverrideEnable || (!hasManifest && (binaryIs64Bit || !osIs64Bit));
     // Expose for ETW enrichment
     private List<DiscoveryContext>? _lastContexts;
     public List<DiscoveryContext> GetLastContexts() => _lastContexts ?? new();
