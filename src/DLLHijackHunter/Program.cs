@@ -455,6 +455,11 @@ public class Program
                 }
             }
 
+            // F3: unresolved ETW duplicates of a resolved finding (same PID or image name) are merged.
+            int beforeMerge = candidates.Count;
+            candidates = ETWDiscoveryEngine.MergeUnresolvedDuplicates(candidates);
+            newFromEtw -= beforeMerge - candidates.Count;
+
             AnsiConsole.MarkupLine($"  [green]ETW added {newFromEtw} new candidates " +
                 $"(total: {candidates.Count})[/]");
         }

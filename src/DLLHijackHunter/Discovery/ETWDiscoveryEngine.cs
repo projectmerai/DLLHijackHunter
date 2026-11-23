@@ -149,8 +149,42 @@ public class ETWDiscoveryEngine
         _processes.Values.Where(p => !string.IsNullOrEmpty(p.BinaryPath))
             .Select(p => (p.BinaryPath, p.ParentBinaryPath ?? "")).ToList();
 
-    /// <summary>F3: merge unresolved ETW findings into resolved twins. TIER 3 behaviour: nothing merged.</summary>
-    internal static List<HijackCandidate> MergeUnresolvedDuplicates(List<HijackCandidate> candidates) => candidates;
+    /// <summary>
+    /// F3: an ETW finding whose binary path is unresolved is merged into a resolved finding with the same
+    /// DLL name and hole directory when the PID matches (same process, hence the same start event) or its
+    /// image name matches the resolved binary's file name. The resolved finding is kept, with a note; an
+    /// unresolved finding with no such twin stays.
+    /// </summary>
+    internal static List<HijackCandidate> MergeUnresolvedDuplicates(List<HijackCandidate> candidates)
+    {
+        static bool Unresolved(HijackCandidate c) =>
+            string.IsNullOrEmpty(c.BinaryPath) || c.Notes.Contains(BinaryPathUnresolvedNote);
+        static string? HoleDir(HijackCandidate c) =>
+            string.IsNullOrEmpty(c.HijackWritablePath) ? null : Path.GetDirectoryName(c.HijackWritablePath)?.TrimEnd('\\');
+
+        var resolved = candidates.Where(c => !Unresolved(c)).ToList();
+        var result = new List<HijackCandidate>(candidates.Count);
+        int merged = 0;
+        foreach (var c in candidates)
+        {
+            if (!Unresolved(c) || !string.Equals(c.DiscoverySource, "etw", StringComparison.OrdinalIgnoreCase)) { result.Add(c); continue; }
+            string? hole = HoleDir(c);
+            var twin = resolved.FirstOrDefault(r =>
+                string.Equals(r.DllName, c.DllName, StringComparison.OrdinalIgnoreCase) &&
+                hole != null && string.Equals(HoleDir(r), hole, StringComparison.OrdinalIgnoreCase) &&
+                ((c.ObservedPid is int pid && r.ObservedPid == pid &&
+                  (c.ObservedProcessStartUtc == null || r.ObservedProcessStartUtc == null || c.ObservedProcessStartUtc == r.ObservedProcessStartUtc)) ||
+                 (!string.IsNullOrEmpty(c.BinaryImageName) &&
+                  string.Equals(Path.GetFileName(r.BinaryPath), c.BinaryImageName, StringComparison.OrdinalIgnoreCase))));
+            if (twin == null) { result.Add(c); continue; }
+            string how = c.ObservedPid is int p2 && twin.ObservedPid == p2 ? $"same PID {p2}" : $"image name {c.BinaryImageName}";
+            twin.Notes.Add($"Merged a duplicate ETW finding for {c.DllName} with an unresolved binary path ({how})");
+            ScanLogger.Debug($"ETW: merged unresolved duplicate {c.DllName} ({c.HijackWritablePath}) into {twin.BinaryPath} ({how})");
+            merged++;
+        }
+        ScanStats.AddDuplicatesMerged(merged);
+        return result;
+    }
 
     /// <summary>F5: log stopped guarded services the ETW phase leaves alone. TIER 3 behaviour: Debug, not counted.</summary>
     internal static int ReportGuardSkips(IEnumerable<ServiceTriggerStep> plan, ISet<string> running)
@@ -689,6 +723,7 @@ public class ETWDiscoveryEngine
                         HijackWritablePath = Path.Combine(actualDir, dllName),
                         RunAsAccount = ctx.TokenUser,
                         DiscoverySource = "etw",
+                        ObservedPid = pid,
                         Notes = {
                             $"DLL loaded from writable directory at runtime (PID {pid})",
                             "[HEURISTIC] ETW cannot guarantee load priority. Verify search-order precedence manually or via Canary."
@@ -716,6 +751,14 @@ public class ETWDiscoveryEngine
             // The scanner's own existence checks (including this handler's File.Exists below)
             // and its children's file activity are not DLL lookups by a victim.
             if (_selfTree.ContainsKey(pid)) return;
+
+            // F3: the System process (PID 4) and Idle (0) never load user-mode DLLs. Their opens of
+            // DLL names (prefetch, cache manager, image section creation) are not loader lookups.
+            if (pid is 0 or 4)
+            {
+                ScanLogger.Debug($"ETW: ignored open of {fileName} by the System process (PID {pid}): not a loader lookup");
+                return;
+            }
 
             // Never a candidate: the tool's own artifacts (*_hhorig.dll, backups, its folder,
             // manifest entries).
@@ -768,6 +811,7 @@ public class ETWDiscoveryEngine
                             HijackWritablePath = fileName,
                             RunAsAccount = tokenUser,
                             DiscoverySource = "etw",
+                            ObservedPid = pid,
                             Notes =
                             {
                                 $"Missing-DLL lookup detected via ETW (PID {pid})",
