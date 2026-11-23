@@ -388,11 +388,25 @@ public class CanaryEngine
                 }
                 deployAttempted = true;
                 fs.Copy(canaryInfo.DllPath, deploy, true);
+                DateTime plantedUtc = DateTime.UtcNow;
                 Act("file-planted", deploy, canaryInfo.IsProxy ? "proxy canary" : "precompiled canary");
 
-                // Trigger execution
+                // Trigger execution. For a Service trigger this returns once the service is stably
+                // RUNNING (ServiceControl waits for it), plus a short grace.
                 bool triggered = await TriggerExecutor.TriggerAsync(
                     candidate, _profile.CanaryTimeoutSeconds, canaryId);
+                DateTime triggeredUtc = DateTime.UtcNow;
+                // Reference for the fire time: when the service reached RUNNING (the audit line of
+                // this candidate's own start, recorded once the state was stable), else the trigger.
+                DateTime referenceUtc;
+                string reference;
+                lock (candidate.CanaryActions)
+                {
+                    var start = candidate.CanaryActions.LastOrDefault(a => a.Action == "service-start");
+                    (referenceUtc, reference) = candidate.Trigger == TriggerType.Service && start != null && start.Utc >= plantedUtc
+                        ? (start.Utc, "service RUNNING")
+                        : (triggeredUtc, "trigger");
+                }
 
                 // If execution could not be triggered at all, fail immediately.
                 if (!triggered)
@@ -402,24 +416,33 @@ public class CanaryEngine
                 }
                 else
                 {
-                    // Poll for the confirmation file across the settle window so we catch both
-                    // fast loaders (check every 2 s) and slow services (full CanarySettleSeconds).
-                    int settleMs = _profile.CanarySettleSeconds * 1000;
-                    int elapsed = 0;
-                    const int pollInterval = 2000;
+                    // R2: poll for the confirmation file. A Service trigger waits up to the
+                    // service wait (default 90 s) after the service is stably RUNNING: the service
+                    // may start the process that loads the DLL long after it starts itself.
+                    int waitMs = CanaryWait.ForTrigger(candidate.Trigger, _profile.CanarySettleSeconds,
+                        _profile.CanaryServiceWaitSeconds);
+                    Act("canary-wait", canaryInfo.ConfirmPath, $"waiting up to {waitMs / 1000} s from {reference}");
+                    var waitClock = System.Diagnostics.Stopwatch.StartNew();
+                    const int pollInterval = 1000;
 
-                    while (elapsed < settleMs)
+                    while (true)
                     {
-                        await Task.Delay(pollInterval);
-                        elapsed += pollInterval;
-
                         if (File.Exists(canaryInfo.ConfirmPath))
                         {
                             candidate.CanaryResult = CanaryResult.Fired;
                             candidate.Confidence = 100.0;
                             ParseConfirmation(candidate, canaryInfo.ConfirmPath);
+                            DateTime confirmUtc;
+                            try { confirmUtc = File.GetLastWriteTimeUtc(canaryInfo.ConfirmPath); }
+                            catch { confirmUtc = DateTime.UtcNow; }
+                            string fired = CanaryWait.FiredText(referenceUtc, confirmUtc, reference) +
+                                FormattableString.Invariant($" ({(confirmUtc - plantedUtc).TotalSeconds:0.0} s after plant)");
+                            Act("canary-fired", canaryInfo.ConfirmPath, fired);
+                            candidate.Notes.Add("Canary fired: " + fired);
                             break;
                         }
+                        if (waitClock.ElapsedMilliseconds >= waitMs) break;
+                        await Task.Delay(pollInterval);
                     }
 
                     if (candidate.CanaryResult != CanaryResult.Fired && !File.Exists(deploy))
@@ -433,12 +456,28 @@ public class CanaryEngine
                     }
                     else if (candidate.CanaryResult != CanaryResult.Fired)
                     {
-                        candidate.CanaryResult = CanaryResult.Timeout;
-                        candidate.Notes.Add(
-                            $"Execution triggered but canary did not fire within {_profile.CanarySettleSeconds} s settle window. " +
-                            "The target may call SetDefaultDllDirectories(), use a hardened search order, " +
-                            "or need specific conditions to load the DLL. " +
-                            "Try --canary-settle <seconds> for a longer wait.");
+                        Act("canary-wait", canaryInfo.ConfirmPath,
+                            FormattableString.Invariant($"no confirm file {waitClock.Elapsed.TotalSeconds:0.0} s after {reference}"));
+                        // R2: did the host crash or fail to load after the plant, naming the planted module?
+                        var (result, cause, note) = CanaryOutcome.ClassifyNoFire(new HostEvidence(
+                            plantedUtc, deploy, CanaryOutcome.ReadEventsSince(plantedUtc)));
+                        if (result == CanaryResult.Failed && cause != null)
+                        {
+                            candidate.CanaryResult = CanaryResult.Failed;
+                            candidate.CanaryFailureCause = cause;
+                            candidate.Notes.Add(note!);
+                            Act("host-failed-after-plant", deploy, note!);
+                        }
+                        else
+                        {
+                            candidate.CanaryResult = CanaryResult.Timeout;
+                            string option = candidate.Trigger == TriggerType.Service ? "--canary-service-wait" : "--canary-settle";
+                            candidate.Notes.Add(
+                                $"Execution triggered but canary did not fire within {waitMs / 1000} s of the {reference}. " +
+                                "The target may call SetDefaultDllDirectories(), use a hardened search order, " +
+                                "or need specific conditions to load the DLL. " +
+                                $"Try {option} <seconds> for a longer wait.");
+                        }
                     }
                 }
 
