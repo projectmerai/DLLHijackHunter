@@ -11,6 +11,7 @@ The real-target run on Checkmk agent 2.2.0p23 confirmed the hole as SYSTEM, and 
 - **`host-failed-after-plant`.** A canary that does not fire, where an Application Error 1000, WER 1001 or Application Popup 26 event since the plant names the planted module, is `Failed` with that `CanaryFailureCause`: no penalty, not Confirmed. Otherwise Timeout keeps −10.
 
 ### Service safety
+- **Guarded services are never started either.** The ETW phase used to start a stopped guarded service; the tool cannot stop it again, so it was left differing from its snapshot (DoSvc, LaunchProtected=2, on p23).
 - **Snapshot once, restore always.** One snapshot (state, start type, PID) per service before the ETW and canary phases; every decision reads it. Every stop and start waits for a stable SCM state (`QueryServiceStatusEx`). After each candidate and at the end of each phase every touched service is restored to its snapshot and verified (3 attempts with backoff). On p23 the targeted run had left `CheckmkService` stopped.
 - A service that cannot be restored is residue (`Kind = "service-state"`, `Service`, `ExpectedState`, `ActualState`, `LastError`), a red console block, and **exit code 4** ("artifacts or service state could not be restored").
 
