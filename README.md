@@ -121,7 +121,11 @@ flowchart TB
 | **AppInit DLLs** | `AppInit_DLLs` points to a writable DLL | Loaded into every process that loads `user32.dll` |
 | **AppCert DLLs** | `AppCertDLLs` points to a writable DLL | Loaded into every `CreateProcess`/`WinExec` caller |
 
+A finding is typed by where the DLL really resolves for that process's architecture (System32 for 64-bit, SysWOW64 for 32-bit, then System and Windows; PATH where the target identity sees it): **Search order** when a real copy exists later in the order (`DllLegitPath` names it, and the note says "Writable position probed before <copy>"), **Phantom** only when there is no copy anywhere.
+
 IFEO `Debugger` and `SilentProcessExit\MonitorProcess` binaries are enumerated and analysed like any other launch point. CWD-based hijacks are not currently produced.
+
+**Service companion executables.** A service can launch EXEs that are not registered anywhere (e.g. a controller it copies into its data directory on every start). For each non-guarded service running as LocalSystem, Local Service or Network Service, static discovery enumerates `*.exe` (depth ≤ 3, ≤ 200 per service) in the service binary's directory, its install root under `Program Files*`, `%ProgramData%\<vendor>`, and directories named in its `ImagePath` arguments or `Parameters` values. EXEs in a directory a standard user can write to are analysed with the parent's trigger and identity (`DiscoverySource = "companion"`, note "possible child of <service>; not observed running"), and capped at **Medium** unless a canary fires or ETW sees the EXE run as a child of that service. This is read-only and always on.
 
 ### Who the target runs as
 
@@ -197,7 +201,8 @@ sequenceDiagram
 - **No compiler needed.** Precompiled x64/x86 canaries are embedded; when the hijacked DLL has exports, an export-forwarding proxy is synthesised at runtime by PE surgery so the host keeps working.
 - **Self-locating.** The canary derives its confirmation path (`%ProgramData%\DLLHijackHunter\canary_<hash>.confirm`) from its own load path, so one binary serves every candidate.
 - **No payload.** It only records who loaded it. Source: `src/DLLHijackHunter/Resources/canary_src.c` (rebuild with `Resources/build_canary.bat`, MSVC required only for that).
-- **Results:** `Fired`, `Timeout` (triggered, never loaded), `Failed` (could not trigger/deploy), `Blocked` (canary quarantined by antivirus — inconclusive), `NotTested` (Run keys, Startup, UAC bypass, and manual targets need a logon/reboot).
+- **Service children.** A service may start the process that loads the DLL well after it starts itself (Checkmk launches `cmk-agent-ctl.exe` ~31 s after every start). For Service triggers the canary therefore waits until the service is stably RUNNING, then up to `--canary-service-wait` seconds (default 90). Each fire is timed in `CanaryActions` (`canary-fired`: seconds from the service reaching RUNNING and from the plant).
+- **Results:** `Fired`, `Timeout` (triggered, never loaded), `Failed` (could not trigger/deploy; or `CanaryFailureCause = "host-failed-after-plant"` when an Application Error, WER or loader-popup event after the plant names the planted module — no penalty, not Confirmed), `Blocked` (canary quarantined by antivirus — inconclusive), `NotTested` (Run keys, Startup, UAC bypass, and manual targets need a logon/reboot).
 - **COM caveat:** in-process COM objects are activated from a scanner-launched client, so a fired canary proves the load but its identity is the scanner's — it is recorded as *caller context* and does not inflate impact.
 
 Proxy canaries can still be inconclusive for ordinal-only exports, decorated export names, or hosts that need the real DLL resident. An inconclusive canary does **not** mean the hijack is impossible.
@@ -212,7 +217,7 @@ Each finding gets a **confidence** (from the filters, probe, canary, and knowled
 |---|---|
 | **Confirmed** | Canary fired |
 | **High** | ≥ 80% **and** a proof signal: probe win, ETW observation, or HijackLibs match |
-| **Medium** | ≥ 50% (unverified static findings are capped here and marked `Static-only`) |
+| **Medium** | ≥ 50% (unverified static findings are capped here and marked `Static-only`; companion findings too, until a canary fires or ETW sees them run under their service) |
 | **Low** | ≥ 20% |
 | **Informational** | Below 20% but above the profile's `--min-confidence` |
 
@@ -239,6 +244,12 @@ Each finding gets a **confidence** (from the filters, probe, canary, and knowled
     --confirmed-only          Report only canary-confirmed findings
     --lpe-only                Ignore System32 / Program Files / Windows positions
     --canary-settle <sec>     Seconds to wait for a canary to fire after triggering
+    --canary-service-wait <sec>  Service triggers: seconds to wait for the canary once the
+                              service is stably RUNNING (default 90; never less than the settle window)
+    --restart-services        DISRUPTIVE, lab/authorised use only: restart running services that
+                              have evidence (companion finding or user-writable binary/companion
+                              directory) under the ETW trace, without --target. Never on by default.
+    --restart-cap <n>         Most services --restart-services restarts [default: 20]
     --log-file <path>         Write a diagnostic log (enumeration, filter, and probe failures)
 -v, --verbose                 Verbose console output
 ```
@@ -274,7 +285,9 @@ Each finding gets a **confidence** (from the filters, probe, canary, and knowled
 Use DLLHijackHunter only on systems you own or are explicitly authorised to assess.
 
 - `--profile safe` (or `--no-canary --no-etw`) is **read-only** — appropriate for production triage.
-- **ETW mode starts services and runs scheduled tasks** to provoke DLL loads, even without the canary.
+- **ETW mode starts services and runs scheduled tasks** to provoke DLL loads, even without the canary. With `--target` it also restarts up to 5 matching running services.
+- **`--restart-services` is disruptive** and for lab or authorised use only: without `--target`, the ETW phase restarts running, non-guarded services that have evidence (a companion finding, or a binary or companion directory a standard user can write to), at most `--restart-cap` (default 20). The plan, with each service's evidence, is logged before anything is restarted. No profile turns it on.
+- **Service state is restored.** One snapshot (state, start type, PID) of every service the tool may touch is taken before the ETW and canary phases. Every stop and start waits for a stable SCM state; after each candidate and at the end of each phase, every touched service is compared with its snapshot and restored (3 attempts with backoff, one audit line each). A service that cannot be restored is residue (`Kind = "service-state"`, exit code `4`).
 - **Canary mode** replaces DLLs (with backup/restore), stops and restarts services, runs tasks, and activates COM objects. Fragile services can misbehave while a proxy canary is loaded.
 - **`--verify-load`** writes probe DLLs transiently into writable positions.
 - **Protected and security services are never stopped or restarted** — services with `LaunchProtected` set, Microsoft security services (WinDefend, WdNisSvc, Sense, MpsSvc, BFE, …), anything running from the Defender folders, and the third-party EDR/AV services in `Resources/security_services.json` (each with its vendor source). Such a service gets no canary (`NotTested`, with the reason); the ETW phase never sends it `stop`.
