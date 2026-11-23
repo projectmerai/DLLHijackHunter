@@ -417,6 +417,7 @@ public class Program
         var candidates = staticEngine.Discover();
 
         // ETW runtime discovery
+        IReadOnlyList<(string Binary, string DllPath)> observedLoads = Array.Empty<(string, string)>();
         if (profile.RunETW && isElevated)
         {
             var etwEngine = new ETWDiscoveryEngine(profile);
@@ -432,6 +433,7 @@ public class Program
                 };
             }
             var etwCandidates = await etwEngine.DiscoverAsync(cancellationToken);
+            observedLoads = etwEngine.ObservedLoads;
             RestartEvidence.MarkObservedCompanions(candidates, etwEngine.ObservedProcesses,
                 staticEngine.GetLastContexts());
 
@@ -467,6 +469,10 @@ public class Program
         {
             AnsiConsole.MarkupLine("[yellow]  Skipping ETW (requires elevation)[/]");
         }
+
+        // F6: a static Phantom whose binary ETW saw load the same DLL from a directory outside its standard
+        // search order (added at runtime with SetDllDirectory/AddDllDirectory) is SearchOrder.
+        RuntimeDirTyping.Apply(candidates, observedLoads, RuntimeDirTyping.IsStandardDir, RuntimeDirTyping.CallsRuntimeDirApi);
 
         int totalDiscovered = candidates.Count;
 

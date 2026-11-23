@@ -200,6 +200,10 @@ public class ETWDiscoveryEngine
         }
         return n;
     }
+    /// <summary>F6: every DLL image load the trace saw: (process image path, loaded DLL path).</summary>
+    internal IReadOnlyList<(string Binary, string DllPath)> ObservedLoads =>
+        _processes.Values.Where(p => !string.IsNullOrEmpty(p.BinaryPath))
+            .SelectMany(p => p.LoadedDlls.ToList().Select(d => (p.BinaryPath, d))).ToList();
     /// <summary>--restart-services policy for this scan (set by Program from static/companion evidence).</summary>
     internal RestartPolicy RestartServices { get; set; } = new();
 
