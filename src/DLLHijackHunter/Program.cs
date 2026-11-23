@@ -626,6 +626,13 @@ public class Program
     /// <summary>End of a completed run: print residue (red) and pick the exit code.</summary>
     private static int FinishRun()
     {
+        // End-of-scan counters (also logged at Info, so they are in every --log-file).
+        string stats = $"Summary: companion executables examined {ScanStats.CompanionsExamined}, kept {ScanStats.CompanionsKept}, " +
+            $"rejected {ScanStats.CompanionsRejected}; stopped guarded services not started {ScanStats.GuardSkipped}; " +
+            $"unresolved ETW duplicates merged {ScanStats.DuplicatesMerged}";
+        AnsiConsole.MarkupLine($"[dim]{Markup.Escape(stats)}[/]");
+        ScanLogger.Audit(stats);
+
         var residue = ScanSession.Residue;
         if (residue.Count > 0)
         {

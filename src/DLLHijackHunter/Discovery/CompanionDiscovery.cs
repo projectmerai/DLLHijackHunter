@@ -164,13 +164,23 @@ internal static class CompanionDiscovery
     internal static List<Companion> Find(IEnumerable<ServiceEntry> services, Env env, int maxDepth = 3,
         int maxExesPerService = 200, List<Examined>? report = null)
     {
-        var found = new List<Companion>();
+var found = new List<Companion>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Hard ceiling on names looked at per service, so "over the cap" can be reported without unbounded walking.
+        int ceiling = Math.Max(maxExesPerService, 0) * 10 + 10;
+        void Note(Examined e)
+        {
+            report?.Add(e);
+            ScanLogger.Debug(e.ExePath.Length > 0
+                ? $"Companion examine: {e.ExePath} (service {e.Service}): {(e.Kept ? "kept" : "rejected")}: {e.Reason}"
+                : $"Companion examine: service {e.Service} skipped: {e.Reason}");
+        }
         foreach (var s in services)
         {
-            if (NormalizeServiceAccount(s.Account) is not string account) continue;
+            if (NormalizeServiceAccount(s.Account) is not string account) continue;   // not a service account: not examined
             if (string.IsNullOrEmpty(s.BinaryPath) || IsUnder(s.BinaryPath, env.SystemRoot)) continue;
-            if (env.Guard(s.Name).guarded) continue;
+            var (guarded, why) = env.Guard(s.Name);
+            if (guarded) { Note(new Examined("", s.Name, false, $"guarded service ({why}); its directories are not examined")); continue; }
 
             var exes = new List<string>();
             var exeSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -178,29 +188,44 @@ internal static class CompanionDiscovery
             {
                 foreach (var exe in EnumerateExes(dir, maxDepth))
                 {
-                    if (exes.Count >= maxExesPerService) break;
+                    if (exes.Count >= ceiling) break;
                     if (exeSet.Add(exe)) exes.Add(exe);
                 }
-                if (exes.Count >= maxExesPerService) break;
+                if (exes.Count >= ceiling) break;
             }
 
             var writableCache = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            int considered = 0;
             foreach (var exe in exes)
             {
-                if (exe.Equals(s.BinaryPath, StringComparison.OrdinalIgnoreCase)) continue;
+                if (exe.Equals(s.BinaryPath, StringComparison.OrdinalIgnoreCase))
+                { Note(new Examined(exe, s.Name, false, "the service binary itself (analysed as the service)")); continue; }
+                if (++considered > maxExesPerService)
+                { Note(new Examined(exe, s.Name, false, $"over the per-service cap ({maxExesPerService} executables)")); continue; }
                 string? dir = Path.GetDirectoryName(exe);
                 if (dir == null) continue;
+                if (!IsPe(exe)) { Note(new Examined(exe, s.Name, false, "not a PE (no MZ header)")); continue; }
                 if (!writableCache.TryGetValue(dir, out bool w))
                     writableCache[dir] = w = SafeWritable(env, dir, account);
-                if (!w) continue;
+                if (!w) { Note(new Examined(exe, s.Name, false, $"directory not writable by a standard user ({dir})")); continue; }
                 if (!seen.Add(s.Name + "|" + exe)) continue;
-                found.Add(new Companion(exe, s.Name, s.Account,
-                    $"in {dir}, a directory related to service {s.Name} that a standard user can write to"));
+                string reason = $"in {dir}, a directory related to service {s.Name} that a standard user can write to";
+                Note(new Examined(exe, s.Name, true, reason));
+                found.Add(new Companion(exe, s.Name, s.Account, reason));
             }
         }
         return found;
     }
 
+    private static bool IsPe(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return fs.ReadByte() == 'M' && fs.ReadByte() == 'Z';
+        }
+        catch { return false; }
+    }
     private static bool SafeWritable(Env env, string dir, string account)
     {
         try { return env.IsDirWritable(dir, account); } catch { return false; }

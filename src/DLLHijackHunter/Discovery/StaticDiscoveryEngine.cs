@@ -155,8 +155,12 @@ public class StaticDiscoveryEngine
             // After the target filter, so a --target scan covers the companions of the
             // services it matched.
             ctx.Status("[yellow]Looking for service companion executables...[/]");
+            var companionReport = new List<CompanionDiscovery.Examined>();
             var companions = CompanionDiscovery.Find(CompanionDiscovery.FromServiceContexts(contexts),
-                CompanionDiscovery.Env.Real());
+                CompanionDiscovery.Env.Real(), report: companionReport);
+            var (cExamined, cKept, cRejected) = CompanionDiscovery.Summarize(companionReport);
+            ScanStats.AddCompanions(cExamined, cKept, cRejected);
+            ScanLogger.Info($"Companion discovery: examined {cExamined}, kept {cKept}, rejected {cRejected}");
             var registered = new HashSet<string>(contexts.Select(c => c.BinaryPath), StringComparer.OrdinalIgnoreCase);
             var startTypes = contexts.Where(c => c.TriggerType == TriggerType.Service)
                 .GroupBy(c => c.TriggerIdentifier, StringComparer.OrdinalIgnoreCase)
@@ -165,7 +169,11 @@ public class StaticDiscoveryEngine
             foreach (var comp in companions)
             {
                 // An EXE that is itself registered (service, task, ...) is analysed as that.
-                if (registered.Contains(comp.ExePath)) continue;
+                if (registered.Contains(comp.ExePath))
+                {
+                    ScanLogger.Debug($"Companion: {comp.ExePath} is also a registered launch point; analysed under that registration");
+                    continue;
+                }
                 contexts.Add(CompanionDiscovery.ToContext(comp,
                     startTypes.TryGetValue(comp.Service, out var st) ? st : "AUTO_START"));
                 companionCount++;
