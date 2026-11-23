@@ -807,6 +807,7 @@ public class ETWDiscoveryEngine
             foreach (var svc in services)
             {
                 var s = await ServiceControl.EnsureSnapshotAsync(svc.TriggerIdentifier);
+                ScanLogger.Info($"Service snapshot: {svc.TriggerIdentifier} state={s.State} start={s.StartType} pid={s.Pid}");
                 if (s.State == SvcState.Running) running.Add(svc.TriggerIdentifier);
             }
 
@@ -843,7 +844,9 @@ public class ETWDiscoveryEngine
             {
                 try
                 {
-                    if (step.Refusal != null && running.Contains(step.Service))
+                    if (step.Refusal != null && !running.Contains(step.Service))
+                        ScanLogger.Debug($"ETW: not starting stopped guarded service '{step.Service}': {step.Refusal}");
+                    if (step.Refusal != null && running.Contains(step.Service) && (targetSet || policy != null))
                     {
                         // 9c91eab would have restarted it here. Record the refusal; send nothing.
                         Audit.Record(EtwActor, null, "service-stop", step.Service, "refused-by-guard: " + step.Refusal);
@@ -918,8 +921,9 @@ public class ETWDiscoveryEngine
             bool isRunning = running.Contains(s);
             if (guarded)
             {
-                // Never send stop to a guarded service. Starting a stopped one is allowed.
-                plan.Add(new ServiceTriggerStep(s, Stop: false, Start: !isRunning,
+                // Never send stop to a guarded service, and never start a stopped one: the tool
+                // could not stop it again, so it would be left differing from the snapshot (R3).
+                plan.Add(new ServiceTriggerStep(s, Stop: false, Start: false,
                     Refusal: reason.Length > 0 ? reason : "guarded"));
                 continue;
             }

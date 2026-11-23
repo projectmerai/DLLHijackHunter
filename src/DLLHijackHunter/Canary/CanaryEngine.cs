@@ -431,10 +431,15 @@ public class CanaryEngine
                         {
                             candidate.CanaryResult = CanaryResult.Fired;
                             candidate.Confidence = 100.0;
+                            // Read the write time first: ParseConfirmation removes the confirm file.
+                            DateTime confirmUtc = DateTime.UtcNow;
+                            try
+                            {
+                                var t = File.GetLastWriteTimeUtc(canaryInfo.ConfirmPath);
+                                if (t.Year > 2000) confirmUtc = t;   // 1601-01-01 = file already gone
+                            }
+                            catch { }
                             ParseConfirmation(candidate, canaryInfo.ConfirmPath);
-                            DateTime confirmUtc;
-                            try { confirmUtc = File.GetLastWriteTimeUtc(canaryInfo.ConfirmPath); }
-                            catch { confirmUtc = DateTime.UtcNow; }
                             string fired = CanaryWait.FiredText(referenceUtc, confirmUtc, reference) +
                                 FormattableString.Invariant($" ({(confirmUtc - plantedUtc).TotalSeconds:0.0} s after plant)");
                             Act("canary-fired", canaryInfo.ConfirmPath, fired);

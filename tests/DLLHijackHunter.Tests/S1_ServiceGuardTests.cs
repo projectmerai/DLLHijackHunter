@@ -106,13 +106,16 @@ public class S1_ServiceGuardTests
     }
 
     [Fact]
-    public void EtwPlan_StoppedGuardedService_MayStillBeStarted()
+    public void EtwPlan_StoppedGuardedService_IsNotStarted()
     {
+        // TIER 3: the tool cannot stop a guarded service again, so starting a stopped one would
+        // leave it differing from the scan's snapshot (seen with DoSvc, LaunchProtected=2, on p23).
         var plan = ETWDiscoveryEngine.PlanServiceTriggers(new[] { "WinDefend" },
             targetSet: true, new HashSet<string>(), PureGuard, out _);
         var step = Assert.Single(plan);
         Assert.False(step.Stop);
-        Assert.True(step.Start);
+        Assert.False(step.Start);
+        Assert.NotNull(step.Refusal);
     }
 
     [Fact]
