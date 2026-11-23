@@ -309,6 +309,29 @@ internal static class RestartManager
 
     private const int ERROR_MORE_DATA = 234;
 
+    /// <summary>PIDs of the processes holding <paramref name="path"/> (loaded image or open handle); empty when none or RM is unavailable.</summary>
+    public static HashSet<int> HolderPids(string path)
+    {
+        var pids = new HashSet<int>();
+        try
+        {
+            if (RmStartSession(out uint session, 0, new StringBuilder(33)) != 0) return pids;
+            try
+            {
+                if (RmRegisterResources(session, 1, new[] { path }, 0, null, 0, null) != 0) return pids;
+                uint needed, count = 0, reasons = 0;
+                if (RmGetList(session, out needed, ref count, null, ref reasons) != ERROR_MORE_DATA) return pids;
+                var infos = new RM_PROCESS_INFO[needed];
+                count = needed;
+                if (RmGetList(session, out needed, ref count, infos, ref reasons) != 0) return pids;
+                foreach (var i in infos.Take((int)count)) pids.Add(i.Process.dwProcessId);
+            }
+            finally { RmEndSession(session); }
+        }
+        catch { }
+        return pids;
+    }
+
     /// <summary>"name (PID n)[, ...]", or null when nothing holds it / RM is unavailable.</summary>
     public static string? DescribeHolders(string path)
     {

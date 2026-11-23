@@ -268,7 +268,7 @@ public class CanaryEngine
             }
 
             // Stop the trigger again before retrying a locked delete (guard-checked for services).
-            Func<Task> stopAgain = () => TriggerExecutor.StopTriggerAsync(candidate, canaryId);
+            Func<Task> stopAgain = () => TriggerExecutor.StopTriggerAsync(candidate, canaryId, deploy);
 
             try
             {

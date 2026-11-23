@@ -75,7 +75,7 @@ public static class TriggerExecutor
     /// (through ServiceControl, so a guarded one is refused) or the scheduled task's running
     /// instance. Other triggers have nothing to stop.
     /// </summary>
-    public static async Task StopTriggerAsync(HijackCandidate candidate, string actorId)
+    public static async Task StopTriggerAsync(HijackCandidate candidate, string actorId, string? canaryPath = null)
     {
         switch (candidate.Trigger)
         {
@@ -93,8 +93,47 @@ public static class TriggerExecutor
                 {
                     Audit.Record(actorId, candidate, "task-end", candidate.TriggerIdentifier, "failed: " + ex.Message);
                 }
+                // F1: wait for the processes this task run started; end a survivor that still holds the canary.
+                if (canaryPath != null)
+                    await TaskProcessTracker.CleanupAsync(candidate, actorId,
+                        TaskProcesses.TryGetValue(candidate.Id, out var rec) ? rec : new List<ProcInfo>(),
+                        canaryPath, new RealProcessTable(), IsGuardedImage);
                 break;
         }
+    }
+
+    /// <summary>F1: processes each task-trigger candidate's run created, by candidate id.</summary>
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<ProcInfo>> TaskProcesses = new();
+
+    private static void RecordTaskProcesses(HijackCandidate candidate, string actorId, TaskProcessWatcher watcher, DateTime runUtc)
+    {
+        var started = watcher.Stop();
+        if (watcher.Error != null)
+        {
+            Audit.Record(actorId, candidate, "task-process-recorded", candidate.TriggerIdentifier,
+                "not recorded: process-start trace unavailable: " + watcher.Error);
+            return;
+        }
+        var schedulers = new HashSet<int>();
+        int sched = ServiceControl.Scm.Query("Schedule").Pid;
+        if (sched > 0) schedulers.Add(sched);
+        var rec = TaskProcessTracker.Collect(started, runUtc, schedulers);
+        TaskProcesses[candidate.Id] = rec;
+        Audit.Record(actorId, candidate, "task-process-recorded", candidate.TriggerIdentifier,
+            rec.Count == 0 ? $"no process started by the Task Scheduler (PID {sched}) in this run ({started.Count} starts seen)"
+                           : string.Join(", ", rec.Select(p => $"{Path.GetFileName(p.ImagePath)} (PID {p.Pid}, parent {p.ParentPid})")));
+    }
+
+    private static HashSet<string>? _guardedImages;
+
+    /// <summary>An image under a security-product folder, or the binary of a guarded service: never terminated.</summary>
+    internal static bool IsGuardedImage(string imagePath)
+    {
+        if (ServiceGuard.IsSecurityProductImage(imagePath)) return true;
+        _guardedImages ??= Discovery.ServiceEnumerator.EnumerateServices()
+            .Where(s => ServiceControl.Guard(s.TriggerIdentifier).guarded)
+            .Select(s => s.BinaryPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _guardedImages.Contains(imagePath);
     }
 
     // sc.exe could not be started at all (e.g. blocked by antivirus). A timeout is not a launch
@@ -105,6 +144,10 @@ public static class TriggerExecutor
     private static async Task<bool> TriggerScheduledTask(HijackCandidate candidate, string actorId, int timeoutSeconds)
     {
         string taskPath = candidate.TriggerIdentifier;
+        // F1: record the processes this run creates (parent chain to the Task Scheduler service,
+        // started after /run), so a survivor holding the canary can be ended at cleanup.
+        using var watcher = new TaskProcessWatcher();
+        DateTime runUtc = DateTime.UtcNow;
         try
         {
             var (exitCode, _, stderr) = await RunProcess(
@@ -122,6 +165,7 @@ public static class TriggerExecutor
             // 8 s covers typical scheduling latency on a moderately loaded system; the canary
             // poll window in CanaryEngine then has the full CanarySettleSeconds remaining.
             await Task.Delay(8000);
+            RecordTaskProcesses(candidate, actorId, watcher, runUtc);
             return true; // trigger sent — CanaryEngine's poll decides the outcome
         }
         catch
