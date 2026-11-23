@@ -322,11 +322,13 @@ public class StaticDiscoveryEngine
         string bestAccount = contexts.OrderByDescending(c => GetContextPriority(c)).First().RunAsAccount;
 
         // 1. Normal Search Order Logic
-        var hijackPositions = SearchOrderCalculator.FindHijackablePositions(binaryPath, dllName, bestAccount);
+        // R1: the search order of the binary's own architecture (SysWOW64 for 32-bit binaries).
+        bool is64 = peResult.Is64Bit;
+        var hijackPositions = SearchOrderCalculator.FindHijackablePositions(binaryPath, dllName, bestAccount, is64);
         foreach (var hijackPath in hijackPositions)
         {
             var bestCtx = contexts.OrderByDescending(c => GetContextPriority(c)).First();
-            string? legitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName, bestAccount);
+            string? legitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName, bestAccount, is64);
 
             // Reclassify: if the hijack position is in a PATH directory (not the binary's own
             // directory or a system directory), mark as EnvPath so the dedup pass can collapse
@@ -337,14 +339,18 @@ public class StaticDiscoveryEngine
                 && PathDirSet.Value.Contains(hijackDir)
                 && !hijackDir.Equals(binaryDir, StringComparison.OrdinalIgnoreCase);
 
+            // One typing decision (HijackTypeResolver): a real copy later in this binary's order
+            // (system directory for its architecture, then the PATH this identity sees) makes the
+            // position SearchOrder; none makes it Phantom. The EnvPath rule above still wins.
+            var resolution = HijackTypeResolver.Classify(hijackPath, is64,
+                SearchOrderCalculator.GetPathDirsFor(bestAccount));
+
             var candidate = new HijackCandidate
             {
                 BinaryPath = binaryPath,
                 DllName = dllName,
-                DllLegitPath = legitPath,
-                Type = isPathDirHijack
-                    ? HijackType.EnvPath
-                    : (legitPath == null ? HijackType.Phantom : HijackType.SearchOrder),
+                DllLegitPath = legitPath ?? resolution.LegitPath,
+                Type = TypeForStaticPosition(isPathDirHijack, resolution),
                 HijackWritablePath = hijackPath,
                 Trigger = bestCtx.TriggerType,
                 TriggerIdentifier = bestCtx.TriggerIdentifier,
@@ -356,6 +362,8 @@ public class StaticDiscoveryEngine
                 IsKnownVulnerability = isKnownVuln,
                 KnowledgeBaseReference = kbRef
             };
+
+            if (!isPathDirHijack) candidate.Notes.Add(resolution.Note);
 
             if (isKnownVuln)
             {
@@ -384,7 +392,7 @@ public class StaticDiscoveryEngine
             {
                 BinaryPath = binaryPath,
                 DllName = dllName,
-                DllLegitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName, bestAccount),
+                DllLegitPath = SearchOrderCalculator.FindActualDllLocation(binaryPath, dllName, bestAccount, peResult.Is64Bit),
                 Type = HijackType.DotLocal,
                 HijackWritablePath = dotLocalDllPath,
                 Trigger = bestCtx.TriggerType,
@@ -465,7 +473,7 @@ public class StaticDiscoveryEngine
         {
             if (!PhantomDllDatabase.Value.Contains(dll)) continue;
 
-            string? actualLocation = SearchOrderCalculator.FindActualDllLocation(binaryPath, dll, bestAccount);
+            string? actualLocation = SearchOrderCalculator.FindActualDllLocation(binaryPath, dll, bestAccount, peResult.Is64Bit);
             if (actualLocation != null) continue;
 
             string? binaryDir = Path.GetDirectoryName(binaryPath);
@@ -477,12 +485,18 @@ public class StaticDiscoveryEngine
                 // Reclassify PATH-directory positions as EnvPath for cross-binary dedup.
                 bool isPathDir = PathDirSet.Value.Contains(binaryDir);
 
-                candidates.Add(new HijackCandidate
+                // R1: the same typing decision as every other site. FindActualDllLocation above
+                // already found no copy in this binary's order, so this is Phantom unless the
+                // resolver sees a copy it does not (it never does today; kept as one decision).
+                var resolution = HijackTypeResolver.Classify(writablePath, peResult.Is64Bit,
+                    SearchOrderCalculator.GetPathDirsFor(bestAccount));
+
+                var phantom = new HijackCandidate
                 {
                     BinaryPath = binaryPath,
                     DllName = dll,
-                    DllLegitPath = null,
-                    Type = isPathDir ? HijackType.EnvPath : HijackType.Phantom,
+                    DllLegitPath = resolution.LegitPath,
+                    Type = TypeForStaticPosition(isPathDir, resolution),
                     HijackWritablePath = writablePath,
                     Trigger = bestCtx.TriggerType,
                     TriggerIdentifier = bestCtx.TriggerIdentifier,
@@ -490,7 +504,9 @@ public class StaticDiscoveryEngine
                     ServiceStartType = bestCtx.StartType,
                     SurvivesReboot = bestCtx.IsAutoStart,
                     DiscoverySource = "static"
-                });
+                };
+                if (!isPathDir) phantom.Notes.Add(resolution.Note);
+                candidates.Add(phantom);
             }
         }
     }

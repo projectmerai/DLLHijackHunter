@@ -562,23 +562,6 @@ public class ETWDiscoveryEngine
             candidate.Notes.Add(ParentNotePrefix + ctx.ParentBinaryPath);
     }
 
-    /// <summary>
-    /// The copy of <paramref name="dllName"/> the loader would fall through to after the probed
-    /// app-dir position: System32 for a 64-bit process, SysWOW64 for a 32-bit one. Null when
-    /// the DLL exists in neither (a true phantom).
-    /// </summary>
-    internal static string? ResolveSystemCopy(string dllName, bool processIs64Bit)
-    {
-        if (string.IsNullOrEmpty(dllName) || dllName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-            return null;
-        string dir = processIs64Bit || !Environment.Is64BitOperatingSystem
-            ? Environment.SystemDirectory
-            : Environment.GetFolderPath(Environment.SpecialFolder.SystemX86);
-        if (string.IsNullOrEmpty(dir)) return null;
-        string path = Path.Combine(dir, dllName);
-        return File.Exists(path) ? path : null;
-    }
-
     private readonly ConcurrentDictionary<string, bool> _is64BitByBinary = new(StringComparer.OrdinalIgnoreCase);
 
     private bool? IsBinary64Bit(string binaryPath)
@@ -758,7 +741,7 @@ public class ETWDiscoveryEngine
                             DiscoverySource = "etw",
                             Notes =
                             {
-                                $"Phantom DLL detected via ETW (PID {pid})",
+                                $"Missing-DLL lookup detected via ETW (PID {pid})",
                                 $"Process probed {fileName} but file does not exist",
                                 "[HEURISTIC] ETW cannot guarantee load priority. Verify search-order precedence manually or via Canary."
                             }
@@ -766,18 +749,17 @@ public class ETWDiscoveryEngine
                         if (ctx != null) ApplyProcessContext(candidate, ctx);
                         MarkUnresolved(candidate, ctx);
 
-                        // The probed path is missing, but the DLL may exist in the system dir the
-                        // loader falls through to (app dir is searched first). Record that copy so
-                        // the canary is built as an export-forwarding proxy: a static importer
-                        // cannot finish loading an export-less canary, so DllMain would never run.
-                        if (IsBinary64Bit(processPath) is bool is64 &&
-                            ResolveSystemCopy(dllName, is64) is string systemCopy)
-                        {
-                            candidate.DllLegitPath = systemCopy;
-                            candidate.Notes.Add($"Real copy loads from {systemCopy}; the writable app-dir " +
-                                "position is probed first (canary will forward its exports)");
-                        }
-
+                        // R1: type the finding by where the DLL really resolves for this process's
+                        // architecture once the probed (missing) position is skipped. A real copy
+                        // later in the order means the writable position wins over it: SearchOrder,
+                        // with DllLegitPath set so the canary is built as an export-forwarding proxy
+                        // (a static importer cannot finish loading an export-less canary). No copy
+                        // anywhere: a true Phantom.
+                        var resolution = HijackTypeResolver.Classify(fileName, IsBinary64Bit(processPath), null,
+                            new HijackTypeResolver.Env { FileExists = _env.FileExists });
+                        candidate.Type = resolution.Type;
+                        candidate.DllLegitPath = resolution.LegitPath;
+                        candidate.Notes.Add(resolution.Note);
                         _candidates.Add(candidate);
                     }
                 }

@@ -14,7 +14,7 @@ public static class SearchOrderCalculator
     public static List<string> GetSearchOrder(string binaryPath, string dllName)
         => GetSearchOrder(binaryPath, dllName, GetProcessPathDirs());
 
-    private static List<string> GetSearchOrder(string binaryPath, string dllName, string[]? pathDirs)
+    private static List<string> GetSearchOrder(string binaryPath, string dllName, string[]? pathDirs, bool is64Bit = true)
     {
         var order = new List<string>();
         string? binaryDir = Path.GetDirectoryName(binaryPath);
@@ -35,7 +35,7 @@ public static class SearchOrderCalculator
         {
             // SafeDllSearchMode = ON (default on modern Windows)
             // System32 → System → Windows → CWD → PATH
-            order.Add(Path.Combine(Environment.SystemDirectory, dllName));
+            order.Add(Path.Combine(SystemDirFor(is64Bit), dllName));
             order.Add(Path.Combine(Environment.GetFolderPath(
                 Environment.SpecialFolder.Windows), "System", dllName));
             order.Add(Path.Combine(Environment.GetFolderPath(
@@ -47,7 +47,7 @@ public static class SearchOrderCalculator
             // SafeDllSearchMode = OFF
             // CWD → System32 → System → Windows → PATH
             order.Insert(1, "[CWD]\\" + dllName); // CWD right after app dir
-            order.Add(Path.Combine(Environment.SystemDirectory, dllName));
+            order.Add(Path.Combine(SystemDirFor(is64Bit), dllName));
             order.Add(Path.Combine(Environment.GetFolderPath(
                 Environment.SpecialFolder.Windows), "System", dllName));
             order.Add(Path.Combine(Environment.GetFolderPath(
@@ -84,14 +84,14 @@ public static class SearchOrderCalculator
     /// non-privileged RunAsAccount), never for the elevated token running this tool.
     /// </summary>
     public static List<string> FindHijackablePositions(string binaryPath, string dllName,
-        string? runAsAccount = null)
+        string? runAsAccount = null, bool is64Bit = true)
     {
         // A service-account target only ever searches the machine PATH; using the scanner's
         // PATH would add per-user PATH directories (e.g. C:\Python311 from the admin's
         // user PATH) that the target never consults — false-positive hijack positions.
         string[]? pathDirs = GetPathDirsFor(runAsAccount);
 
-        var order = GetSearchOrder(binaryPath, dllName, pathDirs);
+        var order = GetSearchOrder(binaryPath, dllName, pathDirs, is64Bit);
         string? actualLocation = order.FirstOrDefault(p => !p.StartsWith("[CWD]") && File.Exists(p));
         var hijackable = new List<string>();
 
@@ -128,9 +128,10 @@ public static class SearchOrderCalculator
     /// Like <see cref="FindActualDllLocation(string, string)"/> but evaluated with the PATH the
     /// target identity actually sees (machine PATH for service accounts).
     /// </summary>
-    internal static string? FindActualDllLocation(string binaryPath, string dllName, string? runAsAccount)
+    internal static string? FindActualDllLocation(string binaryPath, string dllName, string? runAsAccount,
+        bool is64Bit = true)
     {
-        var order = GetSearchOrder(binaryPath, dllName, GetPathDirsFor(runAsAccount));
+        var order = GetSearchOrder(binaryPath, dllName, GetPathDirsFor(runAsAccount), is64Bit);
         return order.FirstOrDefault(p => !p.StartsWith("[CWD]") && File.Exists(p));
     }
 
@@ -176,6 +177,15 @@ public static class SearchOrderCalculator
             return null; // caller falls back to the process PATH
         }
     }
+
+    /// <summary>
+    /// The system directory a process of this bitness loads from: System32 for 64-bit processes,
+    /// SysWOW64 for 32-bit ones (a 32-bit process never loads the 64-bit System32 copy).
+    /// </summary>
+    internal static string SystemDirFor(bool is64Bit) =>
+        is64Bit || !Environment.Is64BitOperatingSystem
+            ? Environment.SystemDirectory
+            : Environment.GetFolderPath(Environment.SpecialFolder.SystemX86);
 
     private static bool GetSafeDllSearchMode()
     {
