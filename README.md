@@ -265,7 +265,7 @@ Each finding gets a **confidence** (from the filters, probe, canary, and knowled
 | `0` | Scan completed (with or without findings) |
 | `1` | Unhandled error |
 | `3` | `--confirmed-only` (or the `redteam` profile) requested, but the canary cannot run — not elevated, or canary disabled. Refused instead of reporting a false "0 findings". |
-| `4` | Scan completed, but artifacts could not be removed. Each is listed in the JSON `Residue` array and a red console block, with its holder when known and whether a delete at reboot was scheduled. Takes precedence over `0`, not over `1` or `3`. |
+| `4` | Scan completed, but artifacts or service state could not be restored. Each is listed in the JSON `Residue` array and a red console block: a placed file with its holder when known and whether a delete at reboot was scheduled; a service (`Kind = "service-state"`) with its expected and actual state and the last error. Takes precedence over `0`, not over `1` or `3`. |
 
 ---
 

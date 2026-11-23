@@ -584,8 +584,17 @@ public class Program
         if (residue.Count > 0)
         {
             AnsiConsole.WriteLine();
-            AnsiConsole.MarkupLine("[bold red]═══ RESIDUE: files DLLHijackHunter placed and could not remove ═══[/]");
-            foreach (var r in residue)
+            AnsiConsole.MarkupLine("[bold red]═══ RESIDUE: artifacts or service state DLLHijackHunter could not restore ═══[/]");
+            foreach (var r in residue.Where(x => x.Kind == "service-state"))
+            {
+                AnsiConsole.MarkupLine($"[bold red]  SERVICE {Markup.Escape(r.Service ?? r.Path)}: expected " +
+                    $"{Markup.Escape(r.ExpectedState ?? "?")}, left {Markup.Escape(r.ActualState ?? "?")}[/]");
+                AnsiConsole.MarkupLine($"[red]    Last error: {Markup.Escape(r.LastError ?? "")}[/]");
+                AnsiConsole.MarkupLine($"[red]    {Markup.Escape(r.Reason)}[/]");
+                ScanLogger.Error($"Residue: service-state service={r.Service} expected={r.ExpectedState} " +
+                    $"actual={r.ActualState} lastError={r.LastError} candidate={r.CandidateId}");
+            }
+            foreach (var r in residue.Where(x => x.Kind != "service-state"))
             {
                 AnsiConsole.MarkupLine($"[red]  {Markup.Escape(r.Path)}[/] [dim]({r.Role})[/]");
                 AnsiConsole.MarkupLine($"[red]    SHA-256: {Markup.Escape(r.Sha256 ?? "unknown")}[/]");
@@ -595,8 +604,9 @@ public class Program
                 ScanLogger.Error($"Residue: {r.Path} role={r.Role} sha256={r.Sha256} holder={r.Holder ?? "unknown"} " +
                     $"delayed={(r.DelayedDeleteScheduled ? "yes" : "no")} candidate={r.CandidateId} reason={r.Reason}");
             }
-            AnsiConsole.MarkupLine($"[bold red]  Exit code {ExitResidue}: scan completed, but artifacts could not be removed. " +
-                "They are recorded in %ProgramData%\\DLLHijackHunter\\artifacts.json and swept on the next run.[/]");
+            AnsiConsole.MarkupLine($"[bold red]  Exit code {ExitResidue}: scan completed, but artifacts or service state could not be restored. " +
+                "Placed files are recorded in %ProgramData%\\DLLHijackHunter\\artifacts.json and swept on the next run; " +
+                "services listed above must be put back by hand.[/]");
         }
         return ComputeExitCode(0, residue.Count);
     }

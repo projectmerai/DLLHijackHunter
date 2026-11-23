@@ -27,6 +27,16 @@ public class CanaryEngine
 
         int confirmed = 0, failed = 0, skipped = 0, blocked = 0;
 
+        // R3: one snapshot of every service this phase may touch, before anything changes.
+        // Every later decision (pre-stop, restore) uses it, never a per-candidate query.
+        foreach (var svc in candidates.Where(c => c.Trigger == TriggerType.Service)
+                     .Select(c => c.TriggerIdentifier).Where(n => !string.IsNullOrWhiteSpace(n))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var s = await ServiceControl.EnsureSnapshotAsync(svc);
+            ScanLogger.Info($"Service snapshot: {svc} state={s.State} start={s.StartType} pid={s.Pid}");
+        }
+
         await AnsiConsole.Progress()
             .StartAsync(async ctx =>
             {
@@ -88,6 +98,10 @@ public class CanaryEngine
 
         // Cleanup all canary artifacts
         CanaryDllBuilder.CleanupAll();
+
+        // R3: end of the canary phase: every touched service back in its snapshot state.
+        foreach (var r in await ServiceControl.RestoreAllAsync("canary-phase"))
+            ScanSession.AddResidue(r);
 
         return candidates;
     }
@@ -236,13 +250,11 @@ public class CanaryEngine
             string? originalHash = hadExistingDll ? fs.Sha256(deploy) : null;
             bool deployAttempted = false;
 
-            // Record initial service state
-            bool serviceWasRunning = false;
-            if (candidate.Trigger == TriggerType.Service)
-            {
-                string queryOut = await ServiceControl.QueryAsync(candidate.TriggerIdentifier, 5000);
-                serviceWasRunning = queryOut.Contains("RUNNING", StringComparison.OrdinalIgnoreCase);
-            }
+            // R3: the service's state comes from the scan's snapshot, never a per-candidate query
+            // (a query during the previous candidate's START_PENDING read "not running" and the
+            // service was then never restarted).
+            bool serviceWasRunning = candidate.Trigger == TriggerType.Service &&
+                ServiceControl.WasRunningAtSnapshot(candidate.TriggerIdentifier);
 
             // Pre-deploy service stop: a running service keeps the DLL mapped and its file
             // handle open, which would cause File.Copy to fail with a sharing violation.
@@ -553,11 +565,14 @@ public class CanaryEngine
                     }
                 }
 
-                // Restore service to its original state
-                if (candidate.Trigger == TriggerType.Service && serviceWasRunning)
+                // R3: restore the service to its snapshot state, wait for a stable state and
+                // verify (retried with backoff). A service that cannot be restored is residue.
+                if (candidate.Trigger == TriggerType.Service &&
+                    await ServiceControl.RestoreAsync(candidate.TriggerIdentifier, canaryId, candidate) is ResidueEntry left)
                 {
-                    await Task.Delay(1000);
-                    await ServiceControl.StartAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
+                    ScanSession.AddResidue(left);
+                    candidate.Notes.Add($"Warning: service {left.Service} could not be restored to {left.ExpectedState} " +
+                        $"(left {left.ActualState}: {left.LastError}). Recorded as residue.");
                 }
             }
         }
