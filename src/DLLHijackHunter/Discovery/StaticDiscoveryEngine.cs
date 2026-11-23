@@ -332,6 +332,9 @@ public class StaticDiscoveryEngine
         return candidates;
     }
 
+    /// <summary>Whether the loader honours &lt;exe&gt;.local for this binary. TIER 3 rule: no manifest, or DevOverrideEnable=1.</summary>
+    internal static bool DotLocalHonoured(bool hasManifest, bool binaryIs64Bit, bool osIs64Bit, bool devOverrideEnable) =>
+        !hasManifest || devOverrideEnable;
     // Expose for ETW enrichment
     private List<DiscoveryContext>? _lastContexts;
     public List<DiscoveryContext> GetLastContexts() => _lastContexts ?? new();
@@ -434,7 +437,8 @@ public class StaticDiscoveryEngine
         // The loader ignores <exe>.local for any executable with an (embedded or external)
         // manifest unless IFEO DevOverrideEnable=1 is set machine-wide — and nearly every
         // modern EXE carries a manifest. Only emit DotLocal where redirection is honoured.
-        bool dotLocalHonoured = !peResult.HasEmbeddedManifest || DevOverrideEnabled.Value;
+        bool dotLocalHonoured = DotLocalHonoured(peResult.HasEmbeddedManifest, peResult.Is64Bit,
+            Environment.Is64BitOperatingSystem, DevOverrideEnabled.Value);
 
         if (dotLocalHonoured &&
             dotLocalParent != null &&
