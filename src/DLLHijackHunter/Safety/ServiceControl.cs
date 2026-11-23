@@ -17,6 +17,30 @@ public enum ServiceActionOutcome
 /// </summary>
 public static class ServiceControl
 {
+    /// <summary>SCM access (status queries and commands). Replaceable in unit tests.</summary>
+    internal static IScm Scm { get; set; } = new RealScm();
+
+    /// <summary>Per-scan service snapshot and touched-service record.</summary>
+    internal static ServiceStateTracker Tracker { get; set; } = new();
+
+    // main (59bf369) behaviour: one immediate query, no wait for a stable state.
+    public static Task<SvcStatus> WaitForStableAsync(string serviceName, int timeoutMs) =>
+        Task.FromResult(Scm.Query(serviceName));
+
+    // main behaviour: the state is read per call, not from a snapshot.
+    public static Task<SvcStatus> EnsureSnapshotAsync(string serviceName)
+    {
+        var s = Scm.Query(serviceName); Tracker.Record(serviceName, s); return Task.FromResult(s);
+    }
+
+    public static bool WasRunningAtSnapshot(string serviceName) => Scm.Query(serviceName).State == SvcState.Running;
+
+    // main behaviour: nothing is restored or verified.
+    public static Task<ResidueEntry?> RestoreAsync(string serviceName, string actorId, HijackCandidate? candidate = null) =>
+        Task.FromResult<ResidueEntry?>(null);
+
+    public static Task<List<ResidueEntry>> RestoreAllAsync(string actorId) => Task.FromResult(new List<ResidueEntry>());
+
     /// <summary>Guard decision used for every stop. Replaceable in unit tests.</summary>
     internal static Func<string, (bool guarded, string reason)> Guard { get; set; } = ServiceGuard.IsGuarded;
 
@@ -42,7 +66,7 @@ public static class ServiceControl
                 "refused-by-guard" + (why.Length > 0 ? $": {why}" : ""));
             return (ServiceActionOutcome.RefusedByGuard, why);
         }
-        var r = await RunScAsync(args, timeoutMs);
+        var r = await Scm.SendAsync("stop", serviceName, timeoutMs);
         Audit.Record(actorId, candidate, "service-stop", serviceName, Describe(r));
         return r;
     }
@@ -53,7 +77,7 @@ public static class ServiceControl
     {
         string? args = BuildStartArguments(serviceName);
         if (args == null) return (ServiceActionOutcome.Failed, "invalid service name");
-        var r = await RunScAsync(args, timeoutMs);
+        var r = await Scm.SendAsync("start", serviceName, timeoutMs);
         Audit.Record(actorId, candidate, "service-start", serviceName, Describe(r));
         return r;
     }
@@ -68,7 +92,7 @@ public static class ServiceControl
     private static string Describe((ServiceActionOutcome outcome, string output) r) =>
         r.outcome == ServiceActionOutcome.Sent ? "sent" : $"failed: {r.output}";
 
-    private static async Task<(ServiceActionOutcome outcome, string output)> RunScAsync(string arguments, int timeoutMs)
+    internal static async Task<(ServiceActionOutcome outcome, string output)> RunScAsync(string arguments, int timeoutMs)
     {
         try
         {

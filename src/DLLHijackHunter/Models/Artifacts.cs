@@ -12,6 +12,14 @@ public enum ArtifactRole
 /// <summary>A file the tool placed and could not remove (or restore).</summary>
 public class ResidueEntry
 {
+    // "file" (a placed artifact) or "service-state" (a service the tool could not restore).
+    public string Kind { get; set; } = "file";
+    // service-state only: the service, the state it had in the scan's snapshot, the state it is
+    // left in, and the last error seen while restoring it.
+    public string? Service { get; set; }
+    public string? ExpectedState { get; set; }
+    public string? ActualState { get; set; }
+    public string? LastError { get; set; }
     public string Path { get; set; } = "";
     public ArtifactRole Role { get; set; }
     public string? Sha256 { get; set; }

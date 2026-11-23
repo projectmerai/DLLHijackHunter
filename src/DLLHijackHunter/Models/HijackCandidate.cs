@@ -129,7 +129,11 @@ public class HijackCandidate
     // ─── Metadata ───
     public List<string> UseCases { get; set; } = new();
     public List<string> Notes { get; set; } = new();
-    public string DiscoverySource { get; set; } = "static"; // "static" or "etw"
+    public string DiscoverySource { get; set; } = "static"; // "static", "etw" or "companion"
+    // Companion findings: the service whose companion executable this is, and whether ETW saw the
+    // executable run during this scan (which lifts the Medium cap).
+    public string? CompanionOf { get; set; }
+    public bool CompanionObserved { get; set; }
     public DateTime DiscoveredAt { get; set; } = DateTime.UtcNow;
 
     public override string ToString() =>

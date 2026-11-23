@@ -302,6 +302,13 @@ public class StaticDiscoveryEngine
     private List<DiscoveryContext>? _lastContexts;
     public List<DiscoveryContext> GetLastContexts() => _lastContexts ?? new();
 
+    /// <summary>
+    /// Type of a static search-order position: the existing EnvPath rule (a PATH directory that is
+    /// not the binary's own directory) first, otherwise the resolver's decision.
+    /// </summary>
+    internal static HijackType TypeForStaticPosition(bool isPathDirHijack, HijackTypeResolver.Resolution r) =>
+        isPathDirHijack ? HijackType.EnvPath : r.Type;
+
     private List<HijackCandidate> AnalyzeDllImport(string binaryPath, string dllName,
         List<DiscoveryContext> contexts, PEAnalysisResult peResult)
     {

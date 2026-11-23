@@ -856,13 +856,23 @@ public class ETWDiscoveryEngine
     }
 
     /// <summary>One service the ETW phase acts on: stop it first (restart) and/or start it.</summary>
-    internal sealed record ServiceTriggerStep(string Service, bool Stop, bool Start, string? Refusal);
+    internal sealed record ServiceTriggerStep(string Service, bool Stop, bool Start, string? Refusal, string? Reason = null);
+
+    /// <summary>--restart-services: restart running, non-guarded services that have evidence.</summary>
+    internal sealed class RestartPolicy
+    {
+        public bool Enabled { get; init; }
+        /// <summary>Why a service is worth restarting (a companion finding, a writable directory), or null.</summary>
+        public Func<string, string?> Evidence { get; init; } = _ => null;
+        public int Cap { get; init; } = 20;
+    }
 
     /// <summary>
     /// What the ETW phase does to each matching auto-start service. Pure: no service is touched.
     /// </summary>
     internal static List<ServiceTriggerStep> PlanServiceTriggers(IEnumerable<string> services, bool targetSet,
-        ISet<string> running, Func<string, (bool guarded, string reason)> guard, out bool capExceeded)
+        ISet<string> running, Func<string, (bool guarded, string reason)> guard, out bool capExceeded,
+        RestartPolicy? policy = null)
     {
         var list = services.ToList();
         var verdicts = list.ToDictionary(s => s, s => guard(s), StringComparer.OrdinalIgnoreCase);

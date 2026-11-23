@@ -5,6 +5,7 @@ using Xunit;
 namespace DLLHijackHunter.Tests;
 
 /// <summary>S1: no stop or restart of protected / security-product services.</summary>
+[Collection("ServiceControl")]
 public class S1_ServiceGuardTests
 {
     private static string Pf(string rest) =>
