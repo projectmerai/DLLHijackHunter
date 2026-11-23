@@ -71,8 +71,12 @@ public static class ScanLogger
         WriteToFile("INFO", StripMarkup(message));
     }
 
+    /// <summary>Test hook: every line written to the log, with its level (INFO, DEBUG, ...).</summary>
+    internal static Action<string, string>? Sink { get; set; }
+
     private static void WriteToFile(string level, string message)
     {
+        Sink?.Invoke(level, message);
         if (_fileWriter == null) return;
 
         lock (_lock)

@@ -17,6 +17,15 @@ internal static class CompanionDiscovery
 
     internal sealed record Companion(string ExePath, string Service, string Account, string Reason);
 
+    /// <summary>F2: one executable (or skipped service) companion discovery looked at, kept or rejected, and why.</summary>
+    internal sealed record Examined(string ExePath, string Service, bool Kept, string Reason);
+
+    internal static (int examined, int kept, int rejected) Summarize(IEnumerable<Examined> report)
+    {
+        var list = report.Where(e => e.ExePath.Length > 0).ToList();
+        return (list.Count, list.Count(e => e.Kept), list.Count(e => !e.Kept));
+    }
+
     internal sealed class Env
     {
         public string[] ProgramFilesRoots { get; init; } = Array.Empty<string>();
@@ -153,7 +162,7 @@ internal static class CompanionDiscovery
     /// LocalService or NetworkService.
     /// </summary>
     internal static List<Companion> Find(IEnumerable<ServiceEntry> services, Env env, int maxDepth = 3,
-        int maxExesPerService = 200)
+        int maxExesPerService = 200, List<Examined>? report = null)
     {
         var found = new List<Companion>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

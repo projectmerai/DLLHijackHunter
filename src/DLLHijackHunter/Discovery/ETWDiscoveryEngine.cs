@@ -149,6 +149,19 @@ public class ETWDiscoveryEngine
         _processes.Values.Where(p => !string.IsNullOrEmpty(p.BinaryPath))
             .Select(p => (p.BinaryPath, p.ParentBinaryPath ?? "")).ToList();
 
+    /// <summary>F3: merge unresolved ETW findings into resolved twins. TIER 3 behaviour: nothing merged.</summary>
+    internal static List<HijackCandidate> MergeUnresolvedDuplicates(List<HijackCandidate> candidates) => candidates;
+
+    /// <summary>F5: log stopped guarded services the ETW phase leaves alone. TIER 3 behaviour: Debug, not counted.</summary>
+    internal static int ReportGuardSkips(IEnumerable<ServiceTriggerStep> plan, ISet<string> running)
+    {
+        int n = 0;
+        foreach (var step in plan.Where(p => p.Refusal != null && !running.Contains(p.Service)))
+        {
+            ScanLogger.Debug($"ETW: not starting stopped guarded service '{step.Service}': {step.Refusal}");
+        }
+        return n;
+    }
     /// <summary>--restart-services policy for this scan (set by Program from static/companion evidence).</summary>
     internal RestartPolicy RestartServices { get; set; } = new();
 
@@ -840,12 +853,12 @@ public class ETWDiscoveryEngine
                 }
             }
 
+            ScanStats.AddGuardSkipped(ReportGuardSkips(plan, running));
+
             foreach (var step in plan)
             {
                 try
                 {
-                    if (step.Refusal != null && !running.Contains(step.Service))
-                        ScanLogger.Debug($"ETW: not starting stopped guarded service '{step.Service}': {step.Refusal}");
                     if (step.Refusal != null && running.Contains(step.Service) && (targetSet || policy != null))
                     {
                         // 9c91eab would have restarted it here. Record the refusal; send nothing.

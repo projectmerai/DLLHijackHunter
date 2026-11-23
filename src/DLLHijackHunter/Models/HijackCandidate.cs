@@ -134,6 +134,9 @@ public class HijackCandidate
     // executable run during this scan (which lifts the Medium cap).
     public string? CompanionOf { get; set; }
     public bool CompanionObserved { get; set; }
+    // ETW findings: the PID (and process start time, when known) of the process that made the lookup.
+    public int? ObservedPid { get; set; }
+    public DateTime? ObservedProcessStartUtc { get; set; }
     public DateTime DiscoveredAt { get; set; } = DateTime.UtcNow;
 
     public override string ToString() =>
