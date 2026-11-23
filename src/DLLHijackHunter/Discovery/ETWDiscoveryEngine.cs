@@ -186,13 +186,17 @@ public class ETWDiscoveryEngine
         return result;
     }
 
-    /// <summary>F5: log stopped guarded services the ETW phase leaves alone. TIER 3 behaviour: Debug, not counted.</summary>
+    /// <summary>
+    /// F5: a stopped guarded service the ETW phase leaves alone (it could not stop it again) is a coverage gap:
+    /// logged at Info with the guard reason, and counted for the end-of-scan summary.
+    /// </summary>
     internal static int ReportGuardSkips(IEnumerable<ServiceTriggerStep> plan, ISet<string> running)
     {
         int n = 0;
         foreach (var step in plan.Where(p => p.Refusal != null && !running.Contains(p.Service)))
         {
-            ScanLogger.Debug($"ETW: not starting stopped guarded service '{step.Service}': {step.Refusal}");
+            ScanLogger.Audit($"ETW: not starting stopped guarded service '{step.Service}': {step.Refusal}");
+            n++;
         }
         return n;
     }
