@@ -116,7 +116,7 @@ flowchart TB
 | **Phantom** | The DLL does not exist anywhere in the search path | Plant it anywhere the binary searches |
 | **Search order** | A writable directory is searched before the legitimate copy | Includes overwriting a DLL in a writable directory |
 | **ENV PATH** | A writable directory in `PATH` is searched for a missing DLL | Services are evaluated against the **machine** PATH only — the user's own PATH entries are never searched by a service |
-| **.local redirect** | `<app>.exe.local\<dll>` redirection | Only reported for executables **without a manifest** (or when IFEO `DevOverrideEnable=1`); the loader ignores `.local` otherwise, and it never redirects KnownDLLs |
+| **.local redirect** | `<app>.exe.local\<dll>` redirection | Only reported for executables **without a manifest** (or when IFEO `DevOverrideEnable=1`), and for a 32-bit EXE on 64-bit Windows only with `DevOverrideEnable=1` (observed: the loader ignored `.local` for such an EXE on Windows 11); it never redirects KnownDLLs |
 | **Side-load (UAC)** | Copy an auto-elevating EXE next to a planted DLL | Only for EXEs with `<autoElevate>true</autoElevate>` in their manifest. Auto-elevation requires a trusted location, so the copy must pass that check (e.g. a mock `C:\Windows \System32\` folder) |
 | **AppInit DLLs** | `AppInit_DLLs` points to a writable DLL | Loaded into every process that loads `user32.dll` |
 | **AppCert DLLs** | `AppCertDLLs` points to a writable DLL | Loaded into every `CreateProcess`/`WinExec` caller |
@@ -292,6 +292,7 @@ Use DLLHijackHunter only on systems you own or are explicitly authorised to asse
 - **`--verify-load`** writes probe DLLs transiently into writable positions.
 - **Protected and security services are never stopped or restarted** — services with `LaunchProtected` set, Microsoft security services (WinDefend, WdNisSvc, Sense, MpsSvc, BFE, …), anything running from the Defender folders, and the third-party EDR/AV services in `Resources/security_services.json` (each with its vendor source). Such a service gets no canary (`NotTested`, with the reason); the ETW phase never sends it `stop`, and never starts it when it is stopped (the tool could not put it back).
 - **Every file the tool places is recorded first** in `%ProgramData%\DLLHijackHunter\artifacts.json`. At startup, leftovers from an earlier run are deleted only if their hash matches what that run wrote, and recorded backups are restored. A file at a deploy path that is a previous DLLHijackHunter artifact is never treated as the original. A file that cannot be removed is retried, its holder is named via the Restart Manager, a delete at reboot is scheduled, and it is reported as residue (exit code `4`).
+- **Scheduled-task triggers** record the processes the task run starts. If a canary cannot be removed, the tool ends the task, waits up to 10 s, and terminates only a process that this run started and that still holds the canary (never a guarded or security-product image); every step is audited.
 - **Audit trail**: every file, service, task and COM action is written to the `--log-file` at Info level (regardless of `--verbose`) and to each finding's `CanaryActions` in the JSON.
 - Unsigned canary/probe DLLs may be quarantined by antivirus; such results are reported as inconclusive (`Blocked` / probe `Error`), never as "not vulnerable".
 

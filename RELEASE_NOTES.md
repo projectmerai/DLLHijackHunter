@@ -1,3 +1,11 @@
+## Unreleased — Cleanup after the Checkmk fixes
+
+- **Scheduled-task leftovers.** A task trigger records the processes its run creates (Task Scheduler parent chain, started after `/run`). When a canary cannot be removed, `/end` is followed by a wait of up to 10 s for those processes; one still holding the canary is terminated, never a process the trigger did not start and never a guarded or security-product image. `task-process-recorded` / `task-process-wait` / `task-process-terminated` in `CanaryActions`.
+- **Companion report.** Every executable companion discovery examines is logged (verbose) as kept or rejected with the reason; the end-of-scan summary gives examined / kept / rejected.
+- **ETW duplicates.** An ETW finding with an unresolved binary path is merged into a resolved finding with the same DLL and hole directory when the PID or image name matches. File opens attributed to the System process (PID 4) are no longer treated as loader lookups. New field `ObservedPid`.
+- **Guard skips visible.** "not starting stopped guarded service" is logged at Info with the guard reason and counted in the summary.
+- **Runtime-added directories.** A static Phantom whose binary ETW saw load the same DLL from a directory outside its standard search order becomes SearchOrder (note "Real copy observed loading from <dir> (runtime-added directory)"); otherwise binaries importing SetDllDirectory/AddDllDirectory get a note.
+- **DotLocal on 32-bit binaries.** On Windows 11 the loader ignored `<exe>.local` for a 32-bit, unmanifested EXE (Checkmk `cmk-agent-ctl.exe`): an unmodified real `secur32.dll` placed there was never loaded. A 32-bit EXE on 64-bit Windows now gets a DotLocal finding only when `DevOverrideEnable=1`.
 ## Unreleased — Fixes from the Checkmk run (CVE-2024-28827)
 
 The real-target run on Checkmk agent 2.2.0p23 confirmed the hole as SYSTEM, and exposed four problems.
