@@ -32,6 +32,15 @@ public class ScanProfile
     public bool VerifyLoad { get; set; } = false;
     public int LoadProbeTimeoutSeconds { get; set; } = 8;
 
+    // --restart-services (opt-in, never set by a profile): the ETW phase restarts running,
+    // non-guarded services that have evidence (a companion finding or a user-writable binary
+    // or companion directory), at most RestartCap of them, without --target.
+    public bool RestartServices { get; set; } = false;
+    public int RestartCap { get; set; } = 20;
+    // Service triggers: after the service is stably RUNNING, how long to wait for the canary
+    // confirm file (a service can launch the child that loads the DLL well after it starts).
+    public int CanaryServiceWaitSeconds { get; set; } = 90;
+
     public static ScanProfile Aggressive => new()
     {
         Name = "aggressive",

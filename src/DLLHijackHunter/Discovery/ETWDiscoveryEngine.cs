@@ -144,6 +144,11 @@ public class ETWDiscoveryEngine
         return _candidates.ToList();
     }
 
+    /// <summary>Every process the trace saw: (image path, parent image path).</summary>
+    internal IReadOnlyList<(string Binary, string Parent)> ObservedProcesses =>
+        _processes.Values.Where(p => !string.IsNullOrEmpty(p.BinaryPath))
+            .Select(p => (p.BinaryPath, p.ParentBinaryPath ?? "")).ToList();
+
     /// <summary>--restart-services policy for this scan (set by Program from static/companion evidence).</summary>
     internal RestartPolicy RestartServices { get; set; } = new();
 

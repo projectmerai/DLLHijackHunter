@@ -67,12 +67,20 @@ public class TieredScorer
         bool hasProof = c.CanaryResult == CanaryResult.Fired
             || c.IsKnownVulnerability
             || c.LoadProbe == LoadProbeResult.Wins
-            || string.Equals(c.DiscoverySource, "etw", StringComparison.OrdinalIgnoreCase);
-        if (!hasProof && c.Confidence > 79.0)
+            || string.Equals(c.DiscoverySource, "etw", StringComparison.OrdinalIgnoreCase)
+            || c.CompanionObserved;
+        // A companion executable is only a *possible* child of its service: Medium at most until
+        // a canary fires or ETW sees it run under that service (a KB match or a load-order win
+        // says nothing about whether the service ever launches it).
+        bool unprovenCompanion = string.Equals(c.DiscoverySource, "companion", StringComparison.OrdinalIgnoreCase)
+            && c.CanaryResult != CanaryResult.Fired && !c.CompanionObserved;
+        if ((!hasProof || unprovenCompanion) && c.Confidence > 79.0)
         {
             c.Confidence = 79.0;
-            if (!c.Notes.Any(n => n.Contains("Static-only", StringComparison.OrdinalIgnoreCase)))
-                c.Notes.Add("Static-only: capped below High pending verification (canary/ETW/KB)");
+            string capNote = unprovenCompanion
+                ? "Companion: capped at Medium until a canary fires or ETW sees it run under its service"
+                : "Static-only: capped below High pending verification (canary/ETW/KB)";
+            if (!c.Notes.Contains(capNote)) c.Notes.Add(capNote);
         }
 
         // ═══ Determine tier ═══

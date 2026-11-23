@@ -17,6 +17,8 @@ public class DiscoveryContext
     public string StartType { get; set; } = "";
     public bool IsAutoStart { get; set; }
     public bool IsSvchostService { get; set; }
+    // A companion executable of the service named in TriggerIdentifier (CompanionDiscovery).
+    public bool IsCompanion { get; set; }
     public TimeSpan? RepeatInterval { get; set; }
 
     // ─── ETW Runtime Fields ───

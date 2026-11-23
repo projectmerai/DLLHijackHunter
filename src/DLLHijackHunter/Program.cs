@@ -216,6 +216,25 @@ public class Program
             description: "Seconds to wait for a canary DLL to fire after execution is triggered (default: profile-defined, aggressive=20)",
             getDefaultValue: () => 0);
 
+        var restartServicesOption = new Option<bool>(
+            aliases: new[] { "--restart-services" },
+            description: "DISRUPTIVE, lab or authorised use only: restart running, non-guarded services that have " +
+                "evidence (a companion finding or a user-writable binary/companion directory) under the ETW trace, " +
+                "without --target. Never on by default");
+
+        var restartCapOption = new Option<int>(
+            aliases: new[] { "--restart-cap" },
+            description: "Most services --restart-services restarts (default 20)",
+            getDefaultValue: () => 20);
+
+        var canaryServiceWaitOption = new Option<int>(
+            aliases: new[] { "--canary-service-wait" },
+            description: "Service triggers: seconds to wait for the canary after the service is stably RUNNING (default 90)",
+            getDefaultValue: () => 0);
+
+        rootCommand.AddOption(restartServicesOption);
+        rootCommand.AddOption(restartCapOption);
+        rootCommand.AddOption(canaryServiceWaitOption);
         rootCommand.AddOption(profileOption);
         rootCommand.AddOption(outputOption);
         rootCommand.AddOption(formatOption);
@@ -250,6 +269,10 @@ public class Program
             var logFile = ctx.ParseResult.GetValueForOption(logFileOption);
             var verifyLoad = ctx.ParseResult.GetValueForOption(verifyLoadOption);
             var canarySettle = ctx.ParseResult.GetValueForOption(canarySettleOption);
+            var extra = new ExtraOptions(
+                ctx.ParseResult.GetValueForOption(restartServicesOption),
+                ctx.ParseResult.GetValueForOption(restartCapOption),
+                ctx.ParseResult.GetValueForOption(canaryServiceWaitOption));
 
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) =>
@@ -260,16 +283,19 @@ public class Program
             };
 
             ctx.ExitCode = await RunScan(profile, output, format, minConf, noCanary, noEtw,
-                confirmedOnly, verbose, target, lpeOnly, logFile, verifyLoad, canarySettle, cts.Token);
+                confirmedOnly, verbose, target, lpeOnly, logFile, verifyLoad, canarySettle, cts.Token, extra);
         });
 
         return await rootCommand.InvokeAsync(args);
     }
 
+    /// <summary>TIER 3 options: --restart-services, --restart-cap, --canary-service-wait.</summary>
+    internal sealed record ExtraOptions(bool RestartServices, int RestartCap, int CanaryServiceWait);
+
     private static async Task<int> RunScan(string profileName, string? outputPath, string format,
         double? minConfidence, bool noCanary, bool noEtw, bool confirmedOnly, bool verbose,
         string? target, bool lpeOnly, string? logFile, bool verifyLoad, int canarySettle,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, ExtraOptions? extra = null)
     {
         var stopwatch = Stopwatch.StartNew();
 
@@ -309,6 +335,13 @@ public class Program
         profile.LpeOnly = lpeOnly;
         if (verifyLoad) profile.VerifyLoad = true;
         if (canarySettle > 0) profile.CanarySettleSeconds = canarySettle;
+        // --restart-services is opt-in only: no profile sets it.
+        if (extra != null)
+        {
+            profile.RestartServices = extra.RestartServices;
+            if (extra.RestartCap > 0) profile.RestartCap = extra.RestartCap;
+            if (extra.CanaryServiceWait > 0) profile.CanaryServiceWaitSeconds = extra.CanaryServiceWait;
+        }
         if (noCanary) profile.RunCanary = false;
         if (noEtw) profile.RunETW = false;
         if (confirmedOnly) profile.ConfirmedOnly = true;
@@ -387,7 +420,20 @@ public class Program
         if (profile.RunETW && isElevated)
         {
             var etwEngine = new ETWDiscoveryEngine(profile);
+            if (profile.RestartServices)
+            {
+                AnsiConsole.MarkupLine("[bold yellow]⚠ --restart-services: running services with evidence will be " +
+                    "restarted (disruptive; lab or authorised use only)[/]");
+                etwEngine.RestartServices = new ETWDiscoveryEngine.RestartPolicy
+                {
+                    Enabled = true,
+                    Cap = profile.RestartCap,
+                    Evidence = RestartEvidence.For(staticEngine.GetLastContexts(), staticEngine.LastCompanions),
+                };
+            }
             var etwCandidates = await etwEngine.DiscoverAsync(cancellationToken);
+            RestartEvidence.MarkObservedCompanions(candidates, etwEngine.ObservedProcesses,
+                staticEngine.GetLastContexts());
 
             // Enrich ETW candidates with static context data
             var staticContexts = staticEngine.GetLastContexts();

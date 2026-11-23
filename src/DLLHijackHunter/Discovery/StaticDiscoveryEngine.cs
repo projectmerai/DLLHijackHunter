@@ -151,6 +151,30 @@ public class StaticDiscoveryEngine
                 }
             }
 
+            // ═══ R4 C: companion executables of services (read-only, always on) ═══
+            // After the target filter, so a --target scan covers the companions of the
+            // services it matched.
+            ctx.Status("[yellow]Looking for service companion executables...[/]");
+            var companions = CompanionDiscovery.Find(CompanionDiscovery.FromServiceContexts(contexts),
+                CompanionDiscovery.Env.Real());
+            var registered = new HashSet<string>(contexts.Select(c => c.BinaryPath), StringComparer.OrdinalIgnoreCase);
+            var startTypes = contexts.Where(c => c.TriggerType == TriggerType.Service)
+                .GroupBy(c => c.TriggerIdentifier, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First().StartType, StringComparer.OrdinalIgnoreCase);
+            int companionCount = 0;
+            foreach (var comp in companions)
+            {
+                // An EXE that is itself registered (service, task, ...) is analysed as that.
+                if (registered.Contains(comp.ExePath)) continue;
+                contexts.Add(CompanionDiscovery.ToContext(comp,
+                    startTypes.TryGetValue(comp.Service, out var st) ? st : "AUTO_START"));
+                companionCount++;
+                ScanLogger.Debug($"Companion: {comp.ExePath} of service {comp.Service} ({comp.Reason})");
+            }
+            _lastCompanions = companions;
+            if (companionCount > 0)
+                AnsiConsole.MarkupLine($"  [green]Found {companionCount} service companion executables in user-writable directories[/]");
+
             // Store contexts for ETW enrichment later
             _lastContexts = contexts;
 
@@ -291,6 +315,8 @@ public class StaticDiscoveryEngine
                 CheckWritablePathDirectories(candidates, contexts);
             }
 
+            MarkCompanionCandidates(candidates, contexts);
+
             AnsiConsole.MarkupLine($"  [green]Generated {candidates.Count} candidates[/]");
             ScanLogger.Debug($"Static discovery complete: {candidates.Count} total candidates generated");
         });
@@ -301,6 +327,26 @@ public class StaticDiscoveryEngine
     // Expose for ETW enrichment
     private List<DiscoveryContext>? _lastContexts;
     public List<DiscoveryContext> GetLastContexts() => _lastContexts ?? new();
+
+    private List<CompanionDiscovery.Companion> _lastCompanions = new();
+    /// <summary>Companion executables found by the last Discover() (also those with no finding).</summary>
+    internal IReadOnlyList<CompanionDiscovery.Companion> LastCompanions => _lastCompanions;
+
+    /// <summary>Findings on a companion executable carry the companion source, parent and note.</summary>
+    internal static void MarkCompanionCandidates(List<HijackCandidate> candidates, List<DiscoveryContext> contexts)
+    {
+        var companionOf = contexts.Where(c => c.IsCompanion)
+            .GroupBy(c => c.BinaryPath, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().TriggerIdentifier, StringComparer.OrdinalIgnoreCase);
+        foreach (var c in candidates)
+        {
+            if (!companionOf.TryGetValue(c.BinaryPath, out var svc)) continue;
+            c.DiscoverySource = CompanionDiscovery.Source;
+            c.CompanionOf = svc;
+            string note = CompanionDiscovery.Note(svc);
+            if (!c.Notes.Contains(note)) c.Notes.Add(note);
+        }
+    }
 
     /// <summary>
     /// Type of a static search-order position: the existing EnvPath rule (a PATH directory that is
