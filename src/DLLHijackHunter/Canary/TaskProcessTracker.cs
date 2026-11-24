@@ -89,12 +89,23 @@ internal static class TaskProcessTracker
             FormattableString.Invariant($"{alive.Count} of {recorded.Count} recorded process(es) still running after {secs:0.0} s: ") +
             string.Join(", ", alive.Select(p => $"{Path.GetFileName(p.ImagePath)} (PID {p.Pid})")));
 
-        foreach (var p in alive)
+        foreach (var rec in alive)
         {
-            string who = $"{p.ImagePath} (PID {p.Pid})";
+            // The live image (the recorded one can be empty when the process was gone before the trace looked it up).
+            var live = table.Find(rec.Pid, rec.StartUtc);
+            if (live == null) continue;                                        // exited meanwhile
+            string image = !string.IsNullOrEmpty(live.ImagePath) ? live.ImagePath : rec.ImagePath;
+            var p = rec with { ImagePath = image };
+            string who = $"{(image.Length > 0 ? image : "(image unknown)")} (PID {p.Pid})";
             if (!table.HoldsModule(p.Pid, canaryPath))
             {
                 ScanLogger.Debug($"Task process {who} still running but does not hold {canaryPath}; left alone");
+                continue;
+            }
+            if (string.IsNullOrEmpty(p.ImagePath) || !Path.IsPathRooted(p.ImagePath))
+            {
+                Audit.Record(actorId, candidate, "task-process-terminated", who,
+                    "refused: image path unknown, so the guard cannot be checked; left running");
                 continue;
             }
             if (isGuardedImage(p.ImagePath))

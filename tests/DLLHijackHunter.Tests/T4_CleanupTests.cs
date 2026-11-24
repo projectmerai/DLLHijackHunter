@@ -92,6 +92,23 @@ public class T4_F1_TaskProcessTests
     }
 
     [Fact]
+    public async Task UnknownRecordedImage_IsCheckedAgainstTheLiveImage_AndRefusedWhenUnknown()
+    {
+        // Recorded with an empty image (it was gone when the trace looked it up); the live process is a security product.
+        var rec = P(1316, Scheduler, "", 0.4);
+        var table = new FakeTable(); table.Live[1316] = rec with { ImagePath = @"C:\Program Files\Windows Defender\MpCmdRun.exe" }; table.Holders.Add(1316);
+        await TaskProcessTracker.CleanupAsync(new HijackCandidate(), "canary", new[] { rec }, Canary, table,
+            img => img.Contains("Windows Defender", StringComparison.OrdinalIgnoreCase), 2000);
+        Assert.Empty(table.Terminated);
+
+        // Image unknown even now: never terminated.
+        var table2 = new FakeTable(); table2.Live[1316] = rec; table2.Holders.Add(1316);
+        var c = new HijackCandidate();
+        await TaskProcessTracker.CleanupAsync(c, "canary", new[] { rec }, Canary, table2, _ => false, 2000);
+        Assert.Empty(table2.Terminated);
+        Assert.Contains(c.CanaryActions, a => a.Action == "task-process-terminated" && a.Result.StartsWith("refused"));
+    }
+    [Fact]
     public async Task ReusedPid_IsNotTheRecordedProcess_AndIsNotTerminated()
     {
         var recorded = P(1316, Scheduler, @"C:\HijackRange\app\hr_task1.exe", 0.4);
@@ -257,7 +274,8 @@ public class T4_F5_GuardSkipTests
             };
             int n = ETWDiscoveryEngine.ReportGuardSkips(plan, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "WinDefend" });
             Assert.Equal(1, n);
-            Assert.Contains(lines, x => x.level == "INFO" && x.msg.Contains("DoSvc") && x.msg.Contains("LaunchProtected=2"));
+            List<(string level, string msg)> copy; lock (lines) copy = lines.ToList();   // other tests log through the same static sink
+            Assert.Contains(copy, x => x.level == "INFO" && x.msg.Contains("DoSvc") && x.msg.Contains("LaunchProtected=2"));
         }
         finally { ScanLogger.Sink = null; }
     }
