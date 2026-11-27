@@ -100,7 +100,9 @@ public static class ConsoleProgress
 {
     public static async Task RunAsync(string title, int total, Func<Action, Task> body)
     {
-        if (AnsiConsole.Profile.Capabilities.Interactive)
+        // Spectre reports a detached process with a redirected stdout (and a console stdin) as interactive; its live
+        // bar then re-printed each percentage 4 times into the file (TIER 5 VM run). Live only on a real terminal.
+        if (AnsiConsole.Profile.Capabilities.Interactive && !Console.IsOutputRedirected && !ConsoleText.Ascii)
         {
             await AnsiConsole.Progress().StartAsync(async ctx =>
             {
