@@ -481,6 +481,13 @@ internal static class RestartManager
 
 public sealed class CleanupOptions
 {
+    /// <summary>
+    /// F3: after the first failed delete, retry every <see cref="FastRetryIntervalMs"/> for up to this long before the
+    /// stop-again / backoff path (0 = off). The first failure's error type and the Restart Manager holders at that
+    /// moment are recorded either way.
+    /// </summary>
+    public int FastRetryMs { get; init; } = 2000;
+    public int FastRetryIntervalMs { get; init; } = 50;
     public int Attempts { get; init; } = 5;
     // ~5 s in total: 0.25 + 0.5 + 1 + 1.5 + 2 s.
     public Func<int, TimeSpan> Backoff { get; init; } = attempt => attempt switch
@@ -528,9 +535,31 @@ public static class ArtifactCleaner
             catch (Exception ex)
             {
                 lastError = ex.Message;
+                if (attempt == 1) lastError += $" [{DeleteErrorKind(ex)}; holders now: {fs.FindLockHolders(path) ?? "none"}]";
             }
 
             audit("file-delete-failed", path, $"attempt {attempt}: {lastError}");
+            // F3: a short bounded retry first. The SDK canaries' first delete failed ~1 ms after the service's process
+            // had exited, with Access denied and no Restart Manager holder (f3_cause.md), and succeeded moments later.
+            if (attempt == 1 && options.FastRetryMs > 0)
+            {
+                var fast = System.Diagnostics.Stopwatch.StartNew();
+                int tries = 0;
+                while (fast.ElapsedMilliseconds < options.FastRetryMs)
+                {
+                    await Task.Delay(Math.Max(1, options.FastRetryIntervalMs));
+                    tries++;
+                    try { if (fs.Exists(path)) fs.Delete(path); } catch (Exception ex) { lastError = ex.Message; continue; }
+                    if (!fs.Exists(path))
+                    {
+                        audit("file-deleted", path, FormattableString.Invariant(
+                            $"ok (bounded retry: {fast.ElapsedMilliseconds} ms after the first failure, {tries} tries)"));
+                        return null;
+                    }
+                }
+                audit("file-delete-failed", path, FormattableString.Invariant(
+                    $"bounded retry: still failing {fast.ElapsedMilliseconds} ms after the first failure ({tries} tries): {lastError}"));
+            }
             if (attempt == 1 && stopTrigger != null)
             {
                 try { await stopTrigger(); } catch { }
@@ -554,6 +583,19 @@ public static class ArtifactCleaner
             DelayedDeleteScheduled = scheduled,
             CandidateId = candidateId,
             Reason = $"could not delete after {options.Attempts} attempts: {lastError}"
+        };
+    }
+
+    /// <summary>F3: what kind of failure a delete was: access denied (5), sharing violation (32), or other.</summary>
+    internal static string DeleteErrorKind(Exception ex)
+    {
+        int code = ex.HResult & 0xFFFF;
+        return ex switch
+        {
+            UnauthorizedAccessException => "access denied (Win32 5)",
+            IOException when code == 32 => "sharing violation (Win32 32)",
+            IOException when code == 5 => "access denied (Win32 5)",
+            _ => $"{ex.GetType().Name} (HRESULT 0x{ex.HResult:X8})"
         };
     }
 

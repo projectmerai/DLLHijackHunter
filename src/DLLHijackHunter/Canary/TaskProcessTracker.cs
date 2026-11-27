@@ -21,8 +21,6 @@ internal interface IProcessTable
     Task Delay(TimeSpan t);
     /// <summary>F3: the live process with this PID (image, start time), or null when none.</summary>
     ProcInfo? Current(int pid) => null;
-    /// <summary>F3: processes that have <paramref name="path"/> loaded or open (Restart Manager); empty when none.</summary>
-    IReadOnlyList<ProcInfo> Holders(string path) => Array.Empty<ProcInfo>();
 }
 
 /// <summary>
@@ -180,14 +178,6 @@ internal sealed class RealProcessTable : IProcessTable
             return new ProcInfo(pid, 0, ETWDiscoveryEngineAccess.ImagePath(pid) ?? p.ProcessName, p.StartTime.ToUniversalTime());
         }
         catch { return null; }
-    }
-
-    public IReadOnlyList<ProcInfo> Holders(string path)
-    {
-        var list = new List<ProcInfo>();
-        foreach (int pid in RestartManager.HolderPids(path))
-            list.Add(Current(pid) ?? new ProcInfo(pid, 0, "", DateTime.MinValue));
-        return list;
     }
 }
 

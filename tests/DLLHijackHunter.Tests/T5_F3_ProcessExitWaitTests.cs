@@ -128,59 +128,42 @@ public sealed class T5_F3_ProcessExitWaitTests : IDisposable
         Assert.Contains(cand.CanaryActions, a => a.Action == "file-delete-failed");
     }
 
-    /// <summary>The service's process exits at STOPPED, but a child (PID 200) still maps the canary for 1.5 s.</summary>
-    private sealed class ChildHoldsTable : IProcessTable
+    /// <summary>
+    /// The SDK / TIER 5 evidence (f3_cause.md): the service's process has exited, no process holds the canary, and
+    /// the delete is still refused with Access denied for a moment (the image is still mapped), then succeeds.
+    /// </summary>
+    private sealed class BrieflyMappedFileOps : RealFileOps
     {
-        private readonly Clock _clock; private readonly FakeScm _scm;
-        private static readonly ProcInfo Svc = new(100, 640, @"C:\x\IpOverUsbSvc.exe", new DateTime(2026, 11, 27, 7, 0, 0, DateTimeKind.Utc));
-        private static readonly ProcInfo Child = new(200, 100, @"C:\x\IpOverUsbEnum.exe", new DateTime(2026, 11, 27, 7, 0, 1, DateTimeKind.Utc));
-        public ChildHoldsTable(Clock c, FakeScm scm) { _clock = c; _scm = scm; }
-        private bool Stopped { get { if (_scm.State == SvcState.Running) return false; _clock.StoppedAt ??= _clock.Seconds; return true; } }
-        public bool ChildAlive => !Stopped || _clock.Seconds - _clock.StoppedAt < 1.5;
-        public ProcInfo? Current(int pid) => pid == 100 && !Stopped ? Svc : null;
-        public ProcInfo? Find(int pid, DateTime startUtc) => pid == 100 && !Stopped ? Svc : null;
-        public IReadOnlyList<ProcInfo> Holders(string path) => ChildAlive ? new[] { Child } : Array.Empty<ProcInfo>();
-        public bool HoldsModule(int pid, string modulePath) => false;
-        public bool Terminate(int pid, out string error) { error = "not used"; return false; }
-        public Task Delay(TimeSpan t) { _clock.Seconds += t.TotalSeconds; return Task.CompletedTask; }
-    }
-
-    private sealed class ChildLockingFileOps : RealFileOps
-    {
-        private readonly ChildHoldsTable _t;
-        public ChildLockingFileOps(ChildHoldsTable t) { _t = t; }
+        public int Refusals = 2; public int Calls;
         public override void Delete(string path)
         {
-            if (_t.ChildAlive) throw new UnauthorizedAccessException($"Access to the path '{path}' is denied.");
+            Calls++;
+            if (Calls <= Refusals) throw new UnauthorizedAccessException($"Access to the path '{path}' is denied.");
             base.Delete(path);
         }
+        public override string? FindLockHolders(string path) => null;     // Restart Manager: no holder
         public override bool ScheduleDeleteOnReboot(string path) => true;
     }
 
     [Fact]
-    public async Task ServicePidExits_ButAChildStillHoldsTheCanary_DeleteWaitsForTheRelease()
+    public async Task AccessDeniedWithNoHolder_BoundedRetryDeletes_WithoutTheStopAgainPath()
     {
-        var scm = new FakeScm(SvcState.Running) { Pid = 100 };
-        ServiceControl.Scm = scm;
-        var table = new ChildHoldsTable(new Clock(), scm);
-        var fs = new ChildLockingFileOps(table);
         string canary = Path.Combine(_dir, "CRYPTSP.dll");
         File.WriteAllBytes(canary, new byte[] { 0x4D, 0x5A, 0, 0 });
-        var cand = new HijackCandidate { Trigger = TriggerType.Service, TriggerIdentifier = Svc, HijackWritablePath = canary };
-
-        await ServiceStopWait.StopAndWaitForExitAsync(Svc, 5000, "c1", cand, table, heldFile: canary);
-        var residue = await ArtifactCleaner.RemoveAsync(canary, ArtifactRole.Canary, null, cand.Id, fs,
-            () => ServiceControl.StopAsync(Svc, 5000, "c1", cand),
-            new CleanupOptions { Attempts = 3, Backoff = _ => TimeSpan.Zero },
-            (a, t, r) => Audit.Record("c1", cand, a, t, r));
+        var fs = new BrieflyMappedFileOps();
+        var audit = new List<(string a, string r)>();
+        bool stoppedAgain = false;
+        var residue = await ArtifactCleaner.RemoveAsync(canary, ArtifactRole.Canary, null, "c1", fs,
+            () => { stoppedAgain = true; return Task.CompletedTask; }, null, (a, t, r) => audit.Add((a, r)));
 
         Assert.Null(residue);
-        Assert.DoesNotContain(cand.CanaryActions, a => a.Action == "file-delete-failed");
-        var wait = Assert.Single(cand.CanaryActions, a => a.Action == "process-exit-wait");
-        Assert.Contains("IpOverUsbEnum.exe (PID 200)", wait.Result);
-        Assert.Contains("released", wait.Result);
+        Assert.False(File.Exists(canary));
+        Assert.False(stoppedAgain);                                           // no second stop, no backoff
+        var first = Assert.Single(audit, x => x.a == "file-delete-failed");
+        Assert.Contains("access denied (Win32 5)", first.r);                  // the error type is recorded
+        Assert.Contains("holders now: none", first.r);                        // and the holder check at that moment
+        Assert.Contains(audit, x => x.a == "file-deleted" && x.r.Contains("bounded retry"));
     }
-
     [Fact]
     public async Task StopToAnAlreadyStoppedService_IsNotSent()
     {
