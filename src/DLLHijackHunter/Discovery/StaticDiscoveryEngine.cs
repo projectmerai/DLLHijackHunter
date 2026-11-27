@@ -296,16 +296,7 @@ public class StaticDiscoveryEngine
                         continue;
                     }
 
-                    // For each imported DLL, check for hijack opportunities
-                    foreach (string dll in peResult.AllImportedDlls)
-                    {
-                        var dllCandidates = AnalyzeDllImport(
-                            binaryPath, dll, executionContexts, peResult);
-                        candidates.AddRange(dllCandidates);
-                    }
-
-                    // Check for phantom DLLs from our database
-                    CheckPhantomDlls(binaryPath, executionContexts, peResult, candidates);
+                    candidates.AddRange(AnalyzeBinary(binaryPath, executionContexts, peResult));
                 }
                 catch (Exception ex)
                 {
@@ -330,6 +321,36 @@ public class StaticDiscoveryEngine
         });
 
         return candidates;
+    }
+
+    /// <summary>Static candidates for one binary: every imported DLL, then the phantom-DLL database.</summary>
+    internal List<HijackCandidate> AnalyzeBinary(string binaryPath, List<DiscoveryContext> executionContexts,
+        PEAnalysisResult peResult)
+    {
+        var candidates = new List<HijackCandidate>();
+        // For each imported DLL, check for hijack opportunities
+        foreach (string dll in peResult.AllImportedDlls)
+            candidates.AddRange(AnalyzeDllImport(binaryPath, dll, executionContexts, peResult));
+
+        // Check for phantom DLLs from our database
+        CheckPhantomDlls(binaryPath, executionContexts, peResult, candidates);
+        return candidates;
+    }
+
+    /// <summary>
+    /// F1: an import the OS loader resolves itself, without a DLL search: <c>mscoree.dll</c> of an image with a CLR
+    /// header. The loader loads it from the system directory before any application-directory lookup, so no static
+    /// search-order position (SearchOrder, Phantom or EnvPath) exists for it. The skip is logged at verbose level.
+    /// Evidence: Windows 11 build 26300 only (SDK run, IpOverUsbSvc.exe, an x86 .NET Framework 4 service): the start
+    /// trace shows IMAGE-LOAD of SysWOW64\mscoree.dll and no FILE-CREATE of &lt;app dir&gt;\mscoree.dll. Not yet
+    /// verified on Windows 10 (OPEN).
+    /// </summary>
+    internal static bool SkipLoaderResolvedImport(string binaryPath, PEAnalysisResult pe, string dllName)
+    {
+        if (!pe.HasClrHeader || !dllName.Equals("mscoree.dll", StringComparison.OrdinalIgnoreCase)) return false;
+        ScanLogger.Debug($"Static: skipped {dllName} for {binaryPath}: managed image (CLR header); the OS loader " +
+            "loads mscoree.dll from the system directory itself, with no application-directory search");
+        return true;
     }
 
     /// <summary>
@@ -385,7 +406,10 @@ public class StaticDiscoveryEngine
         // 1. Normal Search Order Logic
         // R1: the search order of the binary's own architecture (SysWOW64 for 32-bit binaries).
         bool is64 = peResult.Is64Bit;
-        var hijackPositions = SearchOrderCalculator.FindHijackablePositions(binaryPath, dllName, bestAccount, is64);
+        // F1: no search happens for a managed image's mscoree.dll, so there is no search-order position.
+        var hijackPositions = SkipLoaderResolvedImport(binaryPath, peResult, dllName)
+            ? new List<string>()
+            : SearchOrderCalculator.FindHijackablePositions(binaryPath, dllName, bestAccount, is64);
         foreach (var hijackPath in hijackPositions)
         {
             var bestCtx = contexts.OrderByDescending(c => GetContextPriority(c)).First();
@@ -534,6 +558,7 @@ public class StaticDiscoveryEngine
         foreach (string dll in peResult.AllImportedDlls)
         {
             if (!PhantomDllDatabase.Value.Contains(dll)) continue;
+            if (SkipLoaderResolvedImport(binaryPath, peResult, dll)) continue;
 
             string? actualLocation = SearchOrderCalculator.FindActualDllLocation(binaryPath, dll, bestAccount, peResult.Is64Bit);
             if (actualLocation != null) continue;

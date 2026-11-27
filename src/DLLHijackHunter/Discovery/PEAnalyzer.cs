@@ -110,6 +110,14 @@ public class PEAnalyzer
             }
             catch { /* Some PEs have malformed delay imports */ }
 
+            // CLR (COR20) header: data directory 14, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR. A managed image.
+            try
+            {
+                var dd = pe.ImageNtHeaders?.OptionalHeader?.DataDirectory;
+                result.HasClrHeader = dd != null && dd.Length > 14 && dd[14].VirtualAddress != 0 && dd[14].Size != 0;
+            }
+            catch { }
+
             // Check for embedded manifest
             CheckForManifest(pe, filePath, result);
 
@@ -353,6 +361,8 @@ public class PEAnalysisResult
     public bool Is64Bit { get; set; }
     public bool IsSigned { get; set; }
     public bool ForceIntegrity { get; set; }
+    /// <summary>The image has a CLR header (IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR): a .NET assembly.</summary>
+    public bool HasClrHeader { get; set; }
     public string? AnalysisError { get; set; }
 
     private HashSet<string>? _allImportedDlls;

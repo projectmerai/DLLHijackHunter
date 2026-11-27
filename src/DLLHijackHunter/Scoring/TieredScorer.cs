@@ -4,6 +4,8 @@ namespace DLLHijackHunter.Scoring;
 
 public class TieredScorer
 {
+    public const string ProbeCanaryConflictNote = "Load probe and canary disagree: probe Wins, canary Timeout";
+
     public void ScoreAll(List<HijackCandidate> candidates)
     {
         foreach (var c in candidates)
@@ -52,7 +54,14 @@ public class TieredScorer
         // ═══ Load-order verification adjustments ═══
         // A verified win (the real loader picks the writable position) is a strong corroboration;
         // a loss to a protected DLL (KnownDLL/System32/SxS) is a strong false-positive signal.
-        if (c.LoadProbe == LoadProbeResult.Wins)
+        // F1 conflict rule: the probe resolves the name in the scanner's own child process, not in the target. When it
+        // says Wins but the canary in the real target timed out, the two disagree: the probe adds nothing (no boost,
+        // not proof), so the tier is what it would be without the probe. Seen on build 26300 for a .NET service's
+        // mscoree.dll and a companion's DLL (SDK run).
+        bool probeCounts = c.LoadProbe == LoadProbeResult.Wins && c.CanaryResult != CanaryResult.Timeout;
+        if (c.LoadProbe == LoadProbeResult.Wins && c.CanaryResult == CanaryResult.Timeout && !c.Notes.Contains(ProbeCanaryConflictNote))
+            c.Notes.Add(ProbeCanaryConflictNote);
+        if (probeCounts)
             c.Confidence += 10;
         else if (c.LoadProbe == LoadProbeResult.LosesToProtected)
             c.Confidence -= 40;
@@ -66,7 +75,7 @@ public class TieredScorer
         // tier so unverified heuristics never present as High confidence.
         bool hasProof = c.CanaryResult == CanaryResult.Fired
             || c.IsKnownVulnerability
-            || c.LoadProbe == LoadProbeResult.Wins
+            || probeCounts
             || string.Equals(c.DiscoverySource, "etw", StringComparison.OrdinalIgnoreCase)
             || c.CompanionObserved;
         // A companion executable is only a *possible* child of its service: Medium at most until
