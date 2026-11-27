@@ -1,4 +1,64 @@
-## Unreleased — Cleanup after the Checkmk fixes
+## v2.7.0 — Canary Safety, Service-State Restore, Real-Target Verified
+
+Safety and accuracy fixes from benchmarking against the HijackRange lab and a real target. Verified on Windows 11 Enterprise (build 26300) with Microsoft Defender and tamper protection on: a 42-scan HijackRange regression with no outcome regressions, no residue and no Defender detections; and Checkmk Windows agent 2.2.0p23 (CVE-2024-28827), where a plain `--profile aggressive` scan now finds the hole in the agent's child process, types it SearchOrder and confirms it as SYSTEM, while the fixed 2.2.0p29 reports nothing. New exit code 4 (artifacts or service state could not be restored); new flags and JSON fields are additive.
+
+### Canary safety and ETW attribution
+
+Fixes for the first safety defects found on the HijackRange lab (TIER 0B, 2026-11-21). In one aggressive scan, the canary for an ETW finding attributed to `MsMpEng.exe` ran `sc.exe stop WinDefend`, which Defender flagged as `Trojan:Win32/MpTamperSrvDisableAV.H`. A canary that could not be deleted was left at a Users-writable machine-PATH position, and later runs treated it as the original DLL. The tool's own file activity also became findings.
+
+#### Safety
+- **Service guard.** One decision, `ServiceGuard.IsGuarded`, covers `LaunchProtected` services, Microsoft security services, binaries under the Defender folders, and an embedded, source-cited list of third-party EDR/AV services. Every stop goes through `ServiceControl`, which cannot build a stop for a guarded service. A guarded service gets no canary (`NotTested` plus the reason), and the ETW phase never sends it `stop`.
+- **Artifact manifest.** `%ProgramData%\DLLHijackHunter\artifacts.json` records each canary, sidecar, backup and confirm file before it is placed. It is written atomically and accepted only if owned by SYSTEM or Administrators. A startup sweep deletes hash-matched leftovers, restores backups, and reports the rest.
+- **Previous artifacts.** A previous artifact at a deploy path (manifest hash match, or the canary marker) is never backed up or proxied. Runtime proxies now carry an explicit marker.
+- **Cleanup on failure.** On a failed cleanup the tool stops the trigger again, retries with backoff, names the holder via the Restart Manager, and schedules `MOVEFILE_DELAY_UNTIL_REBOOT`.
+- **Residue.** Anything left behind goes in the JSON `Residue` array, a red console block, and new **exit code 4**.
+
+#### ETW attribution
+- The scanner's own PID and all of its descendants, tracked by parent PID, are excluded.
+- File opens by security-product processes are not lookups.
+- Tool artifacts never become candidates: `*_hhorig.dll`, `*.hijackhunter.bak`, `*.probebak`, the tool folder, and manifest entries.
+- Process paths are resolved from the EXE's own image-load event or its command line before `OpenProcess`, so short-lived processes keep their full path. When no full path is found the finding says `binary path unresolved` and `BinaryPath` is empty; it is never a bare name.
+
+#### Scoring
+- `Failed` caused by the harness (could not trigger, back up, or stage the sidecar; target directory missing) no longer costs −20. The cause is recorded in `CanaryFailureCause`. `Timeout` keeps −10.
+
+#### Audit
+- Every side effect is logged at Info level, with a UTC time and ID, whether or not `--verbose` is set. Each finding carries the same list as `CanaryActions`.
+
+#### New JSON fields (additive; existing names unchanged)
+- **Top level:** `ScanId`, `Residue[]` (`Path`, `Role`, `Sha256`, `Holder`, `DelayedDeleteScheduled`, `CandidateId`, `Reason`) and `ArtifactSweep[]` (`Path`, `Role`, `Outcome`, `ScanId`, `Detail`).
+- **Per finding:** `CanaryFailureCause`, `CanaryActions[]` (`Utc`, `Action`, `Target`, `Result`) and `BinaryImageName`.
+
+#### Tests
+- New `tests/DLLHijackHunter.Tests` (xUnit, `net8.0-windows`) covers the guard, attribution, artifact, cleanup, audit and scoring decisions with no side effects outside a temp directory.
+
+### Fixes from the Checkmk run (CVE-2024-28827)
+
+The real-target run on Checkmk agent 2.2.0p23 confirmed the hole as SYSTEM, and exposed four problems.
+
+#### Typing
+- **One typing decision**, `HijackTypeResolver.Classify`, for the ETW FileIOCreate path and the static engine. A real copy later in the process's own search order (System32 for 64-bit, SysWOW64 for 32-bit, then System and Windows; PATH only where the static engine already models it) makes the finding **SearchOrder** with `DllLegitPath` set; **Phantom** only when no copy exists. ETW findings were always Phantom before. The note now states the evidence: "Writable position probed before C:\Windows\SysWOW64\secur32.dll (SearchOrder)".
+
+#### Canary
+- **Service children.** For Service triggers the canary waits until the service is stably RUNNING, then up to `--canary-service-wait` seconds (default 90) for the confirm file. Checkmk launches the vulnerable `cmk-agent-ctl.exe` ~31 s after every start; the old ~23 s wait gave up first (two Timeouts) and two other holes fired only from the previous candidate's start. The export-forwarding proxy builder is unchanged: it was not the cause.
+- Each fire is timed (`canary-fired` in `CanaryActions`).
+- **`host-failed-after-plant`.** A canary that does not fire, where an Application Error 1000, WER 1001 or Application Popup 26 event since the plant names the planted module, is `Failed` with that `CanaryFailureCause`: no penalty, not Confirmed. Otherwise Timeout keeps −10.
+
+#### Service safety
+- **Guarded services are never started either.** The ETW phase used to start a stopped guarded service; the tool cannot stop it again, so it was left differing from its snapshot (DoSvc, LaunchProtected=2, on p23).
+- **Snapshot once, restore always.** One snapshot (state, start type, PID) per service before the ETW and canary phases; every decision reads it. Every stop and start waits for a stable SCM state (`QueryServiceStatusEx`). After each candidate and at the end of each phase every touched service is restored to its snapshot and verified (3 attempts with backoff). On p23 the targeted run had left `CheckmkService` stopped.
+- A service that cannot be restored is residue (`Kind = "service-state"`, `Service`, `ExpectedState`, `ActualState`, `LastError`), a red console block, and **exit code 4** ("artifacts or service state could not be restored").
+
+#### Coverage
+- **Service companion executables** (always on, read-only): EXEs in a service's related directories (binary directory, install root, `%ProgramData%\<vendor>`, directories in `ImagePath` arguments and `Parameters`) that a standard user can write to are analysed with the parent's trigger and identity. `DiscoverySource = "companion"`, capped at Medium unless a canary fires or ETW sees the EXE run under that service.
+- **`--restart-services`** (opt-in, disruptive): without `--target`, the ETW phase restarts running, non-guarded services with evidence, up to `--restart-cap` (default 20), and logs the plan first.
+
+#### New flags and JSON fields (additive)
+- Flags: `--restart-services`, `--restart-cap <n>`, `--canary-service-wait <sec>`.
+- `Residue[]`: `Kind`, `Service`, `ExpectedState`, `ActualState`, `LastError`.
+- Per finding: `CompanionOf`, `CompanionObserved`; `DiscoverySource` can be `companion`; new `CanaryActions` actions `canary-wait`, `canary-fired`, `service-restore`, `host-failed-after-plant`.
+
+### Cleanup after the Checkmk fixes
 
 - **Scheduled-task leftovers.** A task trigger records the processes its run creates (Task Scheduler parent chain, started after `/run`). When a canary cannot be removed, `/end` is followed by a wait of up to 10 s for those processes; one still holding the canary is terminated, never a process the trigger did not start and never a guarded or security-product image. `task-process-recorded` / `task-process-wait` / `task-process-terminated` in `CanaryActions`.
 - **Companion report.** Every executable companion discovery examines is logged (verbose) as kept or rejected with the reason; the end-of-scan summary gives examined / kept / rejected.
@@ -6,61 +66,6 @@
 - **Guard skips visible.** "not starting stopped guarded service" is logged at Info with the guard reason and counted in the summary.
 - **Runtime-added directories.** A static Phantom whose binary ETW saw load the same DLL from a directory outside its standard search order becomes SearchOrder (note "Real copy observed loading from <dir> (runtime-added directory)"); otherwise binaries importing SetDllDirectory/AddDllDirectory get a note.
 - **DotLocal on 32-bit binaries.** On Windows 11 the loader ignored `<exe>.local` for a 32-bit, unmanifested EXE (Checkmk `cmk-agent-ctl.exe`): an unmodified real `secur32.dll` placed there was never loaded. A 32-bit EXE on 64-bit Windows now gets a DotLocal finding only when `DevOverrideEnable=1`.
-## Unreleased — Fixes from the Checkmk run (CVE-2024-28827)
-
-The real-target run on Checkmk agent 2.2.0p23 confirmed the hole as SYSTEM, and exposed four problems.
-
-### Typing
-- **One typing decision**, `HijackTypeResolver.Classify`, for the ETW FileIOCreate path and the static engine. A real copy later in the process's own search order (System32 for 64-bit, SysWOW64 for 32-bit, then System and Windows; PATH only where the static engine already models it) makes the finding **SearchOrder** with `DllLegitPath` set; **Phantom** only when no copy exists. ETW findings were always Phantom before. The note now states the evidence: "Writable position probed before C:\Windows\SysWOW64\secur32.dll (SearchOrder)".
-
-### Canary
-- **Service children.** For Service triggers the canary waits until the service is stably RUNNING, then up to `--canary-service-wait` seconds (default 90) for the confirm file. Checkmk launches the vulnerable `cmk-agent-ctl.exe` ~31 s after every start; the old ~23 s wait gave up first (two Timeouts) and two other holes fired only from the previous candidate's start. The export-forwarding proxy builder is unchanged: it was not the cause.
-- Each fire is timed (`canary-fired` in `CanaryActions`).
-- **`host-failed-after-plant`.** A canary that does not fire, where an Application Error 1000, WER 1001 or Application Popup 26 event since the plant names the planted module, is `Failed` with that `CanaryFailureCause`: no penalty, not Confirmed. Otherwise Timeout keeps −10.
-
-### Service safety
-- **Guarded services are never started either.** The ETW phase used to start a stopped guarded service; the tool cannot stop it again, so it was left differing from its snapshot (DoSvc, LaunchProtected=2, on p23).
-- **Snapshot once, restore always.** One snapshot (state, start type, PID) per service before the ETW and canary phases; every decision reads it. Every stop and start waits for a stable SCM state (`QueryServiceStatusEx`). After each candidate and at the end of each phase every touched service is restored to its snapshot and verified (3 attempts with backoff). On p23 the targeted run had left `CheckmkService` stopped.
-- A service that cannot be restored is residue (`Kind = "service-state"`, `Service`, `ExpectedState`, `ActualState`, `LastError`), a red console block, and **exit code 4** ("artifacts or service state could not be restored").
-
-### Coverage
-- **Service companion executables** (always on, read-only): EXEs in a service's related directories (binary directory, install root, `%ProgramData%\<vendor>`, directories in `ImagePath` arguments and `Parameters`) that a standard user can write to are analysed with the parent's trigger and identity. `DiscoverySource = "companion"`, capped at Medium unless a canary fires or ETW sees the EXE run under that service.
-- **`--restart-services`** (opt-in, disruptive): without `--target`, the ETW phase restarts running, non-guarded services with evidence, up to `--restart-cap` (default 20), and logs the plan first.
-
-### New flags and JSON fields (additive)
-- Flags: `--restart-services`, `--restart-cap <n>`, `--canary-service-wait <sec>`.
-- `Residue[]`: `Kind`, `Service`, `ExpectedState`, `ActualState`, `LastError`.
-- Per finding: `CompanionOf`, `CompanionObserved`; `DiscoverySource` can be `companion`; new `CanaryActions` actions `canary-wait`, `canary-fired`, `service-restore`, `host-failed-after-plant`.
-
-## Canary safety and ETW attribution
-
-Fixes for the first safety defects found on the HijackRange lab (TIER 0B, 2026-11-21). In one aggressive scan, the canary for an ETW finding attributed to `MsMpEng.exe` ran `sc.exe stop WinDefend`, which Defender flagged as `Trojan:Win32/MpTamperSrvDisableAV.H`. A canary that could not be deleted was left at a Users-writable machine-PATH position, and later runs treated it as the original DLL. The tool's own file activity also became findings.
-
-### Safety
-- **Service guard.** One decision, `ServiceGuard.IsGuarded`, covers `LaunchProtected` services, Microsoft security services, binaries under the Defender folders, and an embedded, source-cited list of third-party EDR/AV services. Every stop goes through `ServiceControl`, which cannot build a stop for a guarded service. A guarded service gets no canary (`NotTested` plus the reason), and the ETW phase never sends it `stop`.
-- **Artifact manifest.** `%ProgramData%\DLLHijackHunter\artifacts.json` records each canary, sidecar, backup and confirm file before it is placed. It is written atomically and accepted only if owned by SYSTEM or Administrators. A startup sweep deletes hash-matched leftovers, restores backups, and reports the rest.
-- **Previous artifacts.** A previous artifact at a deploy path (manifest hash match, or the canary marker) is never backed up or proxied. Runtime proxies now carry an explicit marker.
-- **Cleanup on failure.** On a failed cleanup the tool stops the trigger again, retries with backoff, names the holder via the Restart Manager, and schedules `MOVEFILE_DELAY_UNTIL_REBOOT`.
-- **Residue.** Anything left behind goes in the JSON `Residue` array, a red console block, and new **exit code 4**.
-
-### ETW attribution
-- The scanner's own PID and all of its descendants, tracked by parent PID, are excluded.
-- File opens by security-product processes are not lookups.
-- Tool artifacts never become candidates: `*_hhorig.dll`, `*.hijackhunter.bak`, `*.probebak`, the tool folder, and manifest entries.
-- Process paths are resolved from the EXE's own image-load event or its command line before `OpenProcess`, so short-lived processes keep their full path. When no full path is found the finding says `binary path unresolved` and `BinaryPath` is empty; it is never a bare name.
-
-### Scoring
-- `Failed` caused by the harness (could not trigger, back up, or stage the sidecar; target directory missing) no longer costs −20. The cause is recorded in `CanaryFailureCause`. `Timeout` keeps −10.
-
-### Audit
-- Every side effect is logged at Info level, with a UTC time and ID, whether or not `--verbose` is set. Each finding carries the same list as `CanaryActions`.
-
-### New JSON fields (additive; existing names unchanged)
-- **Top level:** `ScanId`, `Residue[]` (`Path`, `Role`, `Sha256`, `Holder`, `DelayedDeleteScheduled`, `CandidateId`, `Reason`) and `ArtifactSweep[]` (`Path`, `Role`, `Outcome`, `ScanId`, `Detail`).
-- **Per finding:** `CanaryFailureCause`, `CanaryActions[]` (`Utc`, `Action`, `Target`, `Result`) and `BinaryImageName`.
-
-### Tests
-- New `tests/DLLHijackHunter.Tests` (xUnit, `net8.0-windows`) covers the guard, attribution, artifact, cleanup, audit and scoring decisions with no side effects outside a temp directory.
 
 ## v2.6.0 — Audit Fixes, False-Positive Reduction, Windows-Verified Detection
 
