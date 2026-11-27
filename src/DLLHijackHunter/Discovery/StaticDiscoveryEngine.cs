@@ -103,14 +103,20 @@ public class StaticDiscoveryEngine
             }
 
             AnsiConsole.MarkupLine($"  [green]Found {contexts.Count} execution contexts[/]");
-            ScanLogger.Debug($"Static discovery: {contexts.Count} execution contexts found");
+            ScanLogger.DebugFileOnly($"Static discovery: {contexts.Count} execution contexts found");
 
-            if (_profile.TriggerAutoElevate)
+            // F4: the AutoElevate hunt respects --target. AutoElevate binaries live under the Windows directory, so a
+            // target elsewhere cannot match one: the hunt is skipped, and the console says so.
+            if (_profile.TriggerAutoElevate && AutoElevateHuntApplies(_profile.TargetPath))
             {
                 ctx.Status("[yellow]Hunting for AutoElevate UAC Bypass binaries...[/]");
                 var autoElevateContexts = AutoElevateEnumerator.EnumerateAutoElevateBinaries();
                 contexts.AddRange(autoElevateContexts);
                 AnsiConsole.MarkupLine($"  [green]Found {autoElevateContexts.Count} AutoElevate binaries[/]");
+            }
+            else if (_profile.TriggerAutoElevate)
+            {
+                AnsiConsole.MarkupLine("  [dim]AutoElevate hunt skipped: --target is outside the Windows directory[/]");
             }
 
             // ═══ FILTER BY TARGET ═══
@@ -271,7 +277,7 @@ public class StaticDiscoveryEngine
                 .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
             AnsiConsole.MarkupLine($"  [green]{uniqueBinaries.Count} unique binaries to analyze[/]");
-            ScanLogger.Debug($"Static discovery: {uniqueBinaries.Count} unique binaries to analyze");
+            ScanLogger.DebugFileOnly($"Static discovery: {uniqueBinaries.Count} unique binaries to analyze");
 
             if (uniqueBinaries.Count == 0)
             {
@@ -317,10 +323,30 @@ public class StaticDiscoveryEngine
             MarkCompanionCandidates(candidates, contexts);
 
             AnsiConsole.MarkupLine($"  [green]Generated {candidates.Count} candidates[/]");
-            ScanLogger.Debug($"Static discovery complete: {candidates.Count} total candidates generated");
+            ScanLogger.DebugFileOnly($"Static discovery complete: {candidates.Count} total candidates generated");
         });
 
         return candidates;
+    }
+
+    /// <summary>
+    /// F4: whether the AutoElevate hunt can produce a context that matches <paramref name="target"/>. AutoElevate
+    /// binaries (manifest autoElevate EXEs in System32/SysWOW64, COM elevation servers) live under the Windows
+    /// directory, so the hunt runs without a target, for a bare file name, or for a target under the Windows directory.
+    /// </summary>
+    internal static bool AutoElevateHuntApplies(string? target, string? windowsDir = null)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return true;
+        string t = Environment.ExpandEnvironmentVariables(target).Replace('/', '\\');
+        if (!t.Contains('\\')) return true;                                   // bare file name: matched by name
+        windowsDir ??= Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        try
+        {
+            string full = Path.GetFullPath(t).TrimEnd('\\') + "\\";
+            string win = Path.GetFullPath(windowsDir).TrimEnd('\\') + "\\";
+            return full.StartsWith(win, StringComparison.OrdinalIgnoreCase) || win.StartsWith(full, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return true; }
     }
 
     /// <summary>Static candidates for one binary: every imported DLL, then the phantom-DLL database.</summary>

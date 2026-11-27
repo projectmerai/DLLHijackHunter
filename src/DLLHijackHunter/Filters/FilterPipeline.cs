@@ -35,7 +35,7 @@ public class FilterPipeline
         var remaining = candidates;
         int initialCount = remaining.Count;
 
-        AnsiConsole.MarkupLine("\n[bold cyan]═══ Filter Pipeline ═══[/]");
+        // F4: the phase header is printed once, by Program ("Phase 2: Filter Pipeline").
 
         // ═══ HARD GATES (binary kill) ═══
         AnsiConsole.MarkupLine("[bold]Hard Gates (binary kill):[/]");
@@ -50,14 +50,15 @@ public class FilterPipeline
             string color = removed > 0 ? "red" : "green";
             AnsiConsole.MarkupLine($"  [{color}]  {gate.Name}: {before} → {remaining.Count} " +
                 $"(removed {removed}, {pct:F0}%)[/]");
-            ScanLogger.Debug($"Hard gate '{gate.Name}': {before} → {remaining.Count} (removed {removed}, {pct:F0}%)");
+            ScanLogger.DebugFileOnly($"Hard gate '{gate.Name}': {before} → {remaining.Count} (removed {removed}, {pct:F0}%)");
         }
 
         int afterHardGates = remaining.Count;
         AnsiConsole.MarkupLine($"[bold]  Survived hard gates: {afterHardGates}[/]");
 
         // ═══ SOFT GATES (confidence adjustment) ═══
-        AnsiConsole.MarkupLine("\n[bold]Soft Gates (confidence adjustment):[/]");
+        // F4: these are score adjustments; they never block or undo a canary confirmation.
+        AnsiConsole.MarkupLine("\n[bold]Soft Gates (score adjustments; they do not affect canary confirmation):[/]");
 
         var softGatePenaltyCounts = new Dictionary<string, int>();
         foreach (var gate in _softGates)
@@ -99,7 +100,7 @@ public class FilterPipeline
         foreach (var gate in _softGates)
         {
             int affected = softGatePenaltyCounts[gate.Name];
-            AnsiConsole.MarkupLine($"  [yellow]  {gate.Name}: penalized {affected} candidates[/]");
+            AnsiConsole.MarkupLine($"  [yellow]  {gate.Name}: score adjusted for {affected} candidates[/]");
         }
 
         // ═══ DEDUPLICATE ═══
@@ -136,7 +137,7 @@ public class FilterPipeline
 
         AnsiConsole.MarkupLine(
             $"[bold green]Pipeline complete: {initialCount} → {remaining.Count} candidates[/]");
-        ScanLogger.Debug($"Filter pipeline complete: {initialCount} → {remaining.Count} candidates");
+        ScanLogger.DebugFileOnly($"Filter pipeline complete: {initialCount} → {remaining.Count} candidates");
 
         return remaining;
     }

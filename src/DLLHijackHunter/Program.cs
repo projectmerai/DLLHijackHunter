@@ -101,6 +101,9 @@ public class Program
         // -t "C:\dir\" (tab completion adds the trailing \) otherwise eats every later option.
         args = RepairArgs(Environment.CommandLine, args);
 
+        // F4: ASCII symbols when the output is redirected or the console is not UTF-8 (→ as ->, and so on).
+        ConsoleText.Install();
+
         // Prevent accidental scan freezes from the legacy console's QuickEdit Mode:
         // a stray click in the window would otherwise put it into mark/select mode and
         // block stdout, stalling a long scan until a key is pressed. Disabled for the run;
@@ -618,6 +621,8 @@ public class Program
         scanResult.AttackChains = correlator.BuildChains(scanResult.AllFindings);
 
         await GenerateOutput(scanResult, format, outputPath);
+        // F4: one console line per Confirmed finding, whatever --format is.
+        ConsoleSummary.PrintConfirmed(scanResult, format, outputPath);
 
         AnsiConsole.MarkupLine($"\n[bold green]Scan complete in {stopwatch.Elapsed:mm\\:ss}[/]");
         AnsiConsole.MarkupLine($"[bold]Findings: {scanResult.TotalFindings}[/] " +

@@ -162,13 +162,13 @@ public static class LoadProbe
 
         int wins = 0, loses = 0, inconclusive = 0, skipped = 0, avBlocked = 0;
 
-        AnsiConsole.Progress().Start(ctx =>
+        // F4: each progress step is printed once, also on a redirected console.
+        ConsoleProgress.Run("Verifying load order", candidates.Count, step =>
         {
-            var task = ctx.AddTask("[green]Verifying load order[/]", maxValue: candidates.Count);
             foreach (var c in candidates)
             {
                 if (cancellationToken.IsCancellationRequested) break;
-                task.Increment(1);
+                step();
 
                 if (Probe(c, probeDll, selfExe!, profile.LoadProbeTimeoutSeconds)) avBlocked++;
                 switch (c.LoadProbe)

@@ -197,6 +197,10 @@ public static class ServiceControl
         return r;
     }
 
+    /// <summary>F4: when the last start of each service was requested (UTC), just before the command was sent.</summary>
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> StartRequestedUtc =
+        new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Start a service. Starting is allowed even for guarded services.</summary>
     public static async Task<(ServiceActionOutcome outcome, string output)> StartAsync(string serviceName,
         int timeoutMs, string actorId, HijackCandidate? candidate = null)
@@ -206,6 +210,7 @@ public static class ServiceControl
         await EnsureSnapshotAsync(serviceName);
         await WaitForStableAsync(serviceName, StateWaitMs);
         Tracker.MarkStart(serviceName);
+        StartRequestedUtc[serviceName] = DateTime.UtcNow;   // F4: the canary's fire time is also given relative to this
         var r = await Scm.SendAsync("start", serviceName, timeoutMs);
         // The SCM marks the service START_PENDING before StartService returns (or sc.exe gives
         // up), so waiting for a stable state covers both a normal and a slow start.

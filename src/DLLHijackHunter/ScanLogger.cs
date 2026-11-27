@@ -64,6 +64,18 @@ public static class ScanLogger
     /// </summary>
     public static void Audit(string message) => WriteToFile("INFO", message);
 
+    /// <summary>
+    /// F4: a debug line that repeats something the console already shows (a phase summary): log file only, even
+    /// with --verbose, so the console prints each summary once.
+    /// </summary>
+    public static void DebugFileOnly(string message) => WriteToFile("DEBUG", message);
+
+    /// <summary>
+    /// F4: per-event diagnostics (e.g. every "ETW: ignored open ... by the System process"): log file only, at TRACE
+    /// level, never on the console even with --verbose. Callers print one count line at verbose level instead.
+    /// </summary>
+    public static void Trace(string message) => WriteToFile("TRACE", message);
+
     public static void Status(string message)
     {
         AnsiConsole.MarkupLine(message);

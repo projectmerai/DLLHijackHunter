@@ -26,7 +26,8 @@ public class CanaryEngine
             return candidates;
         }
 
-        AnsiConsole.MarkupLine($"\n[bold cyan]═══ Canary Confirmation ({candidates.Count} candidates) ═══[/]");
+        // F4: the phase header is printed once, by Program; here only the count.
+        AnsiConsole.MarkupLine($"  [bold]{candidates.Count} candidates to test[/]");
 
         int confirmed = 0, failed = 0, skipped = 0, blocked = 0;
 
@@ -40,11 +41,9 @@ public class CanaryEngine
             ScanLogger.Info($"Service snapshot: {svc} state={s.State} start={s.StartType} pid={s.Pid}");
         }
 
-        await AnsiConsole.Progress()
-            .StartAsync(async ctx =>
+        // F4: each progress step is printed once, also on a redirected console.
+        await ConsoleProgress.RunAsync("Testing candidates", candidates.Count, async step =>
             {
-                var task = ctx.AddTask("[green]Testing candidates[/]", maxValue: candidates.Count);
-
                 foreach (var candidate in candidates)
                 {
                     if (cancellationToken.IsCancellationRequested)
@@ -53,7 +52,7 @@ public class CanaryEngine
                         break;
                     }
 
-                    task.Increment(1);
+                    step();
 
                     // Skip candidates that can't be triggered automatically
                     if (candidate.Trigger is TriggerType.Startup or TriggerType.RunKey or
@@ -398,9 +397,16 @@ public class CanaryEngine
 
                 // Trigger execution. For a Service trigger this returns once the service is stably
                 // RUNNING (ServiceControl waits for it), plus a short grace.
+                DateTime triggerRequestUtc = DateTime.UtcNow;
                 bool triggered = await TriggerExecutor.TriggerAsync(
                     candidate, _profile.CanaryTimeoutSeconds, canaryId);
                 DateTime triggeredUtc = DateTime.UtcNow;
+                // F4: the fire time is also given relative to the start request (Service) or the trigger request.
+                DateTime? fireRequestUtc = triggerRequestUtc;
+                string fireRequestLabel = "trigger";
+                if (candidate.Trigger == TriggerType.Service &&
+                    ServiceControl.StartRequestedUtc.TryGetValue(candidate.TriggerIdentifier, out var startReq) && startReq >= plantedUtc)
+                    (fireRequestUtc, fireRequestLabel) = (startReq, "start request");
                 // Reference for the fire time: when the service reached RUNNING (the audit line of
                 // this candidate's own start, recorded once the state was stable), else the trigger.
                 DateTime referenceUtc;
@@ -445,9 +451,11 @@ public class CanaryEngine
                             }
                             catch { }
                             ParseConfirmation(candidate, canaryInfo.ConfirmPath);
-                            string fired = CanaryWait.FiredText(referenceUtc, confirmUtc, reference) +
-                                FormattableString.Invariant($" ({(confirmUtc - plantedUtc).TotalSeconds:0.0} s after plant)");
-                            Act("canary-fired", canaryInfo.ConfirmPath, fired);
+                            // F4: never a negative "after RUNNING"; the exact times stay in CanaryActions.
+                            DateTime? runningUtc = reference == "service RUNNING" ? referenceUtc : null;
+                            string fired = FireTime.Describe(plantedUtc, fireRequestUtc, fireRequestLabel, runningUtc, confirmUtc);
+                            Act("canary-fired", canaryInfo.ConfirmPath,
+                                fired + " " + FireTime.Exact(plantedUtc, fireRequestUtc, runningUtc, confirmUtc));
                             candidate.Notes.Add("Canary fired: " + fired);
                             break;
                         }

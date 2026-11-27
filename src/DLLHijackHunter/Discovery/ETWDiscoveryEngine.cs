@@ -18,6 +18,13 @@ public class ETWDiscoveryEngine
     private readonly ConcurrentDictionary<int, DiscoveryContext> _processes = new();
     private readonly ConcurrentBag<HijackCandidate> _candidates = new();
     private readonly ConcurrentDictionary<string, byte> _failedLookups = new();
+    // F4: events ignored by design, counted; each one is a TRACE line in the log file only.
+    private int _ignoredSystem, _ignoredArtifact, _ignoredSecurity;
+
+    /// <summary>F4: the one verbose line that replaces the per-event "ignored" lines on the console.</summary>
+    internal string IgnoredSummary() =>
+        $"ETW: ignored {_ignoredSystem} file open(s) by the System process (PID 4), {_ignoredArtifact} of DLLHijackHunter " +
+        $"artifacts, {_ignoredSecurity} by security products (each one is a TRACE line in the log file)";
     private readonly EtwEnvironment _env;
     // The scanner's PID and every descendant (by ProcessStart parent PID).
     private readonly ConcurrentDictionary<int, byte> _selfTree = new();
@@ -124,7 +131,8 @@ public class ETWDiscoveryEngine
             session.Stop();
             AnsiConsole.MarkupLine($"  [green]ETW captured {_candidates.Count} candidates, " +
                 $"{_failedLookups.Count} failed DLL lookups[/]");
-            ScanLogger.Debug($"ETW results: {_candidates.Count} candidates, {_failedLookups.Count} failed DLL lookups");
+            ScanLogger.DebugFileOnly($"ETW results: {_candidates.Count} candidates, {_failedLookups.Count} failed DLL lookups");
+            ScanLogger.Debug(IgnoredSummary());
         }
         catch (Exception ex)
         {
@@ -688,7 +696,8 @@ public class ETWDiscoveryEngine
             // Loads of the tool's own artifacts (a leftover sidecar, a backup) are not findings.
             if (_env.IsToolArtifact(fileName))
             {
-                ScanLogger.Debug($"ETW: ignored load of DLLHijackHunter artifact {fileName} (PID {pid})");
+                Interlocked.Increment(ref _ignoredArtifact);
+                ScanLogger.Trace($"ETW: ignored load of DLLHijackHunter artifact {fileName} (PID {pid})");
                 return;
             }
 
@@ -764,7 +773,9 @@ public class ETWDiscoveryEngine
             // DLL names (prefetch, cache manager, image section creation) are not loader lookups.
             if (pid is 0 or 4)
             {
-                ScanLogger.Debug($"ETW: ignored open of {fileName} by the System process (PID {pid}): not a loader lookup");
+                // F4: one line per event is log-file only (TRACE); the count is printed once at verbose level.
+                Interlocked.Increment(ref _ignoredSystem);
+                ScanLogger.Trace($"ETW: ignored open of {fileName} by the System process (PID {pid}): not a loader lookup");
                 return;
             }
 
@@ -772,7 +783,8 @@ public class ETWDiscoveryEngine
             // manifest entries).
             if (_env.IsToolArtifact(fileName))
             {
-                ScanLogger.Debug($"ETW: ignored open of DLLHijackHunter artifact {fileName} (PID {pid})");
+                Interlocked.Increment(ref _ignoredArtifact);
+                ScanLogger.Trace($"ETW: ignored open of DLLHijackHunter artifact {fileName} (PID {pid})");
                 return;
             }
 
@@ -796,7 +808,8 @@ public class ETWDiscoveryEngine
                         // Logged for diagnostics; no candidate.
                         if (ctx != null && _env.IsSecurityProductImage(ctx.BinaryPath))
                         {
-                            ScanLogger.Debug($"ETW: ignored file open of {fileName} by security product " +
+                            Interlocked.Increment(ref _ignoredSecurity);
+                            ScanLogger.Trace($"ETW: ignored file open of {fileName} by security product " +
                                 $"{ctx.BinaryPath} (PID {pid})");
                             return;
                         }
@@ -895,12 +908,13 @@ public class ETWDiscoveryEngine
             var restarts = plan.Where(p => p.Stop).ToList();
             if (restarts.Count > 0 || policy != null)
             {
-                ScanLogger.Info($"ETW restart plan: {restarts.Count} service(s)" +
+                // F4: the plan is printed once on the console; the log file keeps its INFO record.
+                ScanLogger.Audit($"ETW restart plan: {restarts.Count} service(s)" +
                     (policy != null ? $" (--restart-services, cap {policy.Cap})" : ""));
                 AnsiConsole.MarkupLine($"[yellow]  Restart plan: {restarts.Count} running service(s) will be restarted under the trace[/]");
                 foreach (var p in restarts)
                 {
-                    ScanLogger.Info($"ETW restart plan: {p.Service}: {p.Reason}");
+                    ScanLogger.Audit($"ETW restart plan: {p.Service}: {p.Reason}");
                     AnsiConsole.MarkupLine($"[yellow]    {Markup.Escape(p.Service)}: {Markup.Escape(p.Reason ?? "")}[/]");
                 }
             }
@@ -920,7 +934,7 @@ public class ETWDiscoveryEngine
 
                     if (step.Stop)
                     {
-                        ScanLogger.Debug($"ETW: restarting running target service '{step.Service}' under trace");
+                        ScanLogger.DebugFileOnly($"ETW: restarting running target service '{step.Service}' under trace");
                         AnsiConsole.MarkupLine($"[yellow]  Restarting running service {Markup.Escape(step.Service)} " +
                             "so its startup is traced[/]");
                         // StopAsync waits for STOPPED (or a stable state) before it returns.
