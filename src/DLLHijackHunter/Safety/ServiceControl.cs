@@ -86,7 +86,7 @@ public static class ServiceControl
     {
         var snap = Tracker.Snapshot(serviceName);
         if (snap == null || snap.State is not (SvcState.Running or SvcState.Stopped)) return null;
-        // F6: already reported as service-not-restorable when it was started; it cannot be stopped, so no attempt.
+        // F6: provisionally not restorable (RUNNING without SERVICE_ACCEPT_STOP): no stop attempt; the end-of-scan check decides.
         if (Tracker.IsNotRestorable(serviceName)) return null;
 
         var cur = await WaitForStableAsync(serviceName, StateWaitMs);
@@ -228,24 +228,77 @@ public static class ServiceControl
         var r = await Scm.SendAsync("start", serviceName, timeoutMs);
         // The SCM marks the service START_PENDING before StartService returns (or sc.exe gives
         // up), so waiting for a stable state covers both a normal and a slow start.
+        // dwControlsAccepted is judged only at a stable state: while START_PENDING a service may report 0 controls.
         var s = await WaitForStableAsync(serviceName, StateWaitMs);
         Audit.Record(actorId, candidate, "service-start", serviceName, WithState(r, s));
-        // F6 fallback (not the expected path): started from Stopped, but the running service does not accept a stop.
-        if (snapStopped && s.State == SvcState.Running && Scm.ControlsAccepted(serviceName) is int ca && (ca & SERVICE_ACCEPT_STOP) == 0)
+        if (!snapStopped) return r;
+        if (s.State == SvcState.Stopped && !Rejected(r) && r.outcome == ServiceActionOutcome.Sent)
         {
-            Tracker.MarkNotRestorable(serviceName);
+            // Ran and stopped again by itself (edgeupdate with the network off): nothing to restore.
+            Audit.Record(actorId, candidate, "service-self-stopped", serviceName,
+                $"service {serviceName} stopped on its own after {SecondsSince(StartRequestedUtc[serviceName])} s");
+            ScanStats.AddSelfRecovered(1);
+        }
+        // F6 fallback (not the expected path): RUNNING without SERVICE_ACCEPT_STOP. Provisional only: the end-of-scan
+        // check (ResolveProvisionalAsync) reports residue only if the service is still off its snapshot state then.
+        else if (s.State == SvcState.Running && Scm.ControlsAccepted(serviceName) is int ca && (ca & SERVICE_ACCEPT_STOP) == 0)
+        {
             string why = $"dwControlsAccepted=0x{ca:X} lacks SERVICE_ACCEPT_STOP";
-            Audit.Record(actorId, candidate, "service-not-restorable", serviceName, why);
-            ScanLogger.Error($"service {serviceName} was started by the tool and does not accept a stop ({why}); it cannot be returned to Stopped");
-            DLLHijackHunter.Canary.ScanSession.AddResidue(new ResidueEntry
-            {
-                Kind = "service-not-restorable", Service = serviceName, Path = "service:" + serviceName,
-                ExpectedState = SvcState.Stopped.ToString(), ActualState = s.State.ToString(), LastError = why,
-                CandidateId = candidate?.Id,
-                Reason = $"service {serviceName} was started by the tool and does not accept a stop; it cannot be returned to Stopped"
-            });
+            Tracker.MarkNotRestorable(serviceName, new ServiceStateTracker.Provisional(actorId, candidate, why, StartRequestedUtc[serviceName]));
+            Audit.Record(actorId, candidate, "service-provisionally-not-restorable", serviceName,
+                $"{why}; checked again at the end of the scan");
         }
         return r;
+    }
+
+    private static string SecondsSince(DateTime utc) =>
+        Math.Max(0, (DateTime.UtcNow - utc).TotalSeconds).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>F6: how long the end-of-scan check waits, in total, for provisionally not-restorable services.</summary>
+    internal static int ProvisionalWaitMs { get; set; } = 120_000;
+
+    /// <summary>
+    /// F6, at the end of the scan (when the residue list is built; idempotent): every provisionally not-restorable
+    /// service gets a bounded wait (<see cref="ProvisionalWaitMs"/> in total) to return to its snapshot state. Back in
+    /// it: no residue, an audit line (and a CanaryActions entry). Still off it: service-not-restorable residue (exit 4).
+    /// </summary>
+    public static async Task ResolveProvisionalAsync()
+    {
+        var pending = Tracker.ProvisionalNotRestorable;
+        if (pending.Count == 0) return;
+        var sw = Stopwatch.StartNew();
+        long waited = 0;
+        foreach (var (name, p) in pending)
+        {
+            var snap = Tracker.Snapshot(name);
+            var want = snap?.State ?? SvcState.Stopped;
+            var cur = Scm.Query(name);
+            while (cur.State != want && Math.Max(waited, sw.ElapsedMilliseconds) < ProvisionalWaitMs)
+            {
+                await Scm.Delay(TimeSpan.FromMilliseconds(PollMs));
+                waited += PollMs;
+                cur = Scm.Query(name);
+            }
+            if (cur.State == want)
+            {
+                Tracker.ClearNotRestorable(name);
+                Audit.Record(p.ActorId, p.Candidate, "service-self-recovered", name,
+                    $"service-not-restorable {name} returned to {want} on its own after {SecondsSince(p.StartRequestedUtc)} s");
+                ScanStats.AddSelfRecovered(1);
+                continue;
+            }
+            Tracker.MarkFinalNotRestorable(name);
+            string why = $"{p.Why}; still {cur.State} at the end of the scan";
+            Audit.Record(p.ActorId, p.Candidate, "service-not-restorable", name, why);
+            ScanLogger.Error($"service {name} was started by the tool and does not accept a stop ({why}); it cannot be returned to {want}");
+            DLLHijackHunter.Canary.ScanSession.AddResidue(new ResidueEntry
+            {
+                Kind = "service-not-restorable", Service = name, Path = "service:" + name,
+                ExpectedState = want.ToString(), ActualState = cur.State.ToString(), LastError = why,
+                CandidateId = p.Candidate?.Id,
+                Reason = $"service {name} was started by the tool and does not accept a stop; it cannot be returned to {want}"
+            });
+        }
     }
 
     /// <summary>Read-only state query (not audited: it changes nothing).</summary>

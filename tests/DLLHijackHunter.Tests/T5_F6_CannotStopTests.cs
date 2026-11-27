@@ -94,6 +94,9 @@ public sealed class T5_F6_CannotStopTests : IDisposable
         var scm = new F6Scm { AcceptsStop = false };
         ServiceControl.Scm = scm;
         await ServiceControl.StartAsync("T5F6NoStop", 5000, "etw-trigger");
+        // F6 refinement: provisional until the end-of-scan check, which reports it (still Running). By reflection, so the
+        // file still compiles against the base commit for the red run (there the method does not exist).
+        await (typeof(ServiceControl).GetMethod("ResolveProvisionalAsync")?.Invoke(null, null) as Task ?? Task.CompletedTask);
 
         var r = Assert.Single(ScanSession.Residue, x => x.Service == "T5F6NoStop");
         Assert.Equal("service-not-restorable", r.Kind);

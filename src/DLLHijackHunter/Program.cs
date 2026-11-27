@@ -642,10 +642,13 @@ public class Program
     /// <summary>End of a completed run: print residue (red) and pick the exit code.</summary>
     private static int FinishRun()
     {
+        // F6: settle provisionally not-restorable services before the residue list is final (no-op if already done).
+        ServiceControl.ResolveProvisionalAsync().GetAwaiter().GetResult();
         // End-of-scan counters (also logged at Info, so they are in every --log-file).
         string stats = $"Summary: companion executables examined {ScanStats.CompanionsExamined}, kept {ScanStats.CompanionsKept}, " +
             $"rejected {ScanStats.CompanionsRejected}; stopped guarded services not started {ScanStats.GuardSkipped}; " +
             $"stopped services not started (tool cannot stop them again) {ScanStats.CannotStopSkipped}; " +
+            $"started services that returned to their snapshot state on their own {ScanStats.SelfRecovered}; " +
             $"unresolved ETW duplicates merged {ScanStats.DuplicatesMerged}";
         AnsiConsole.MarkupLine($"[dim]{Markup.Escape(stats)}[/]");
         ScanLogger.Audit(stats);
@@ -691,6 +694,7 @@ public class Program
 
     private static async Task GenerateOutput(ScanResult scanResult, string format, string? outputPath)
     {
+        await ServiceControl.ResolveProvisionalAsync();   // F6: before the report's residue list is built
         AttachSideEffects(scanResult);
         string effectiveFormat = format;
         if (outputPath != null) effectiveFormat = Path.GetExtension(outputPath).ToLowerInvariant() switch { ".json" => "json", ".html" or ".htm" => "html", _ => format };

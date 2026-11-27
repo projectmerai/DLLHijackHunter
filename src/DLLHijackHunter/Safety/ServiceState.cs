@@ -142,10 +142,18 @@ public sealed class ServiceStateTracker
     internal void MarkStart(string name) { lock (_lock) _started.Add(name); }
     internal bool WasStopSent(string name) { lock (_lock) return _stopped.Contains(name); }
     internal bool WasStartSent(string name) { lock (_lock) return _started.Contains(name); }
-    // F6: started by the tool but does not accept a stop: reported once as service-not-restorable, never restored.
-    private readonly HashSet<string> _notRestorable = new(StringComparer.OrdinalIgnoreCase);
-    internal void MarkNotRestorable(string name) { lock (_lock) _notRestorable.Add(name); }
-    internal bool IsNotRestorable(string name) { lock (_lock) return _notRestorable.Contains(name); }
+    // F6: started by the tool, RUNNING (a stable state) without SERVICE_ACCEPT_STOP: provisionally not restorable. No stop
+    // is attempted; the end-of-scan check decides (back in its snapshot state = no residue; otherwise service-not-restorable).
+    internal sealed record Provisional(string ActorId, Models.HijackCandidate? Candidate, string Why, DateTime StartRequestedUtc);
+    private readonly Dictionary<string, Provisional> _notRestorable = new(StringComparer.OrdinalIgnoreCase);
+    internal void MarkNotRestorable(string name, Provisional p) { lock (_lock) _notRestorable.TryAdd(name, p); }
+    private readonly HashSet<string> _finalNotRestorable = new(StringComparer.OrdinalIgnoreCase);
+    internal bool IsNotRestorable(string name) { lock (_lock) return _notRestorable.ContainsKey(name) || _finalNotRestorable.Contains(name); }
+    internal IReadOnlyList<KeyValuePair<string, Provisional>> ProvisionalNotRestorable { get { lock (_lock) return _notRestorable.ToList(); } }
+    /// <summary>Back in its snapshot state on its own: restorable again, nothing to report.</summary>
+    internal void ClearNotRestorable(string name) { lock (_lock) _notRestorable.Remove(name); }
+    /// <summary>Reported as service-not-restorable residue: never restored and never reported again.</summary>
+    internal void MarkFinalNotRestorable(string name) { lock (_lock) { _notRestorable.Remove(name); _finalNotRestorable.Add(name); } }
     public IReadOnlyList<string> Touched { get { lock (_lock) return _stopped.Union(_started, StringComparer.OrdinalIgnoreCase).ToList(); } }
     public IReadOnlyDictionary<string, SvcStatus> All { get { lock (_lock) return new Dictionary<string, SvcStatus>(_snapshot, StringComparer.OrdinalIgnoreCase); } }
 }
