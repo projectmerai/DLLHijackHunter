@@ -45,9 +45,9 @@ public static class TriggerExecutor
         string serviceName = candidate.TriggerIdentifier;
         try
         {
-            // Stop the service (may already be stopped by CanaryEngine's pre-deploy stop, but
-            // running it again is harmless — ensures any locked file handle is released).
-            // ServiceControl refuses guarded services; CanaryEngine never gets here for one.
+            // Stop the service if it is running. After CanaryEngine's pre-deploy stop it is already Stopped, and
+            // StopAsync then sends nothing (F3: no doubled stop). ServiceControl refuses guarded services;
+            // CanaryEngine never gets here for one.
             var stop = await ServiceControl.StopAsync(serviceName, 10_000, actorId, candidate);
             if (stop.outcome == ServiceActionOutcome.RefusedByGuard || IsLaunchFailure(stop))
                 return false;

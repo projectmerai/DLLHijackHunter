@@ -177,7 +177,14 @@ public static class ServiceControl
         }
         await EnsureSnapshotAsync(serviceName);
         // A control sent while the service is mid-transition is rejected (1061): settle first.
-        await WaitForStableAsync(serviceName, StateWaitMs);
+        var settled = await WaitForStableAsync(serviceName, StateWaitMs);
+        // F3: a service that is already Stopped gets no second stop (the SDK timelines showed a stop after the
+        // pre-deploy stop, and another after a failed delete; sc.exe only answers 1062 "not started").
+        if (settled.State is SvcState.Stopped or SvcState.NotFound)
+        {
+            ScanLogger.Debug($"service-stop {serviceName}: not sent, already {settled.State}");
+            return (ServiceActionOutcome.Sent, $"not sent: already {settled.State}");
+        }
         Tracker.MarkStop(serviceName);
         var r = await Scm.SendAsync("stop", serviceName, timeoutMs);
         // A stop that sc.exe gave up on is still queued at the SCM and lands later: wait for

@@ -19,6 +19,8 @@ internal interface IProcessTable
     bool HoldsModule(int pid, string modulePath);
     bool Terminate(int pid, out string error);
     Task Delay(TimeSpan t);
+    /// <summary>F3: the live process with this PID (image, start time), or null when none.</summary>
+    ProcInfo? Current(int pid) => null;
 }
 
 /// <summary>
@@ -165,6 +167,18 @@ internal sealed class RealProcessTable : IProcessTable
     }
 
     public Task Delay(TimeSpan t) => Task.Delay(t);
+
+    public ProcInfo? Current(int pid)
+    {
+        if (pid <= 0) return null;
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            if (p.HasExited) return null;
+            return new ProcInfo(pid, 0, ETWDiscoveryEngineAccess.ImagePath(pid) ?? p.ProcessName, p.StartTime.ToUniversalTime());
+        }
+        catch { return null; }
+    }
 }
 
 internal static class ETWDiscoveryEngineAccess

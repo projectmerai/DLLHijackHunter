@@ -268,8 +268,8 @@ public class CanaryEngine
             // running state once testing is complete.
             if (candidate.Trigger == TriggerType.Service && serviceWasRunning)
             {
-                await ServiceControl.StopAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
-                await Task.Delay(1500); // allow the service process to exit and unload the DLL
+                // F3: wait for the service's process to exit and unload the DLL (was a fixed 1.5 s).
+                await ServiceStopWait.StopAndWaitForExitAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
             }
 
             // Stop the trigger again before retrying a locked delete (guard-checked for services).
@@ -500,9 +500,10 @@ public class CanaryEngine
             }
             finally
             {
-                // For services, stop first to reduce DLL/file locking before cleanup/restore
+                // For services, stop first and wait for the process to exit (F3), so the delete does not race
+                // the process unmapping the canary. The delete's retry/residue path remains the fallback.
                 if (candidate.Trigger == TriggerType.Service)
-                    await ServiceControl.StopAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
+                    await ServiceStopWait.StopAndWaitForExitAsync(candidate.TriggerIdentifier, 5000, canaryId, candidate);
 
                 // Cleanup: remove the canary, but only if what sits there is still our canary.
                 bool canaryGone = true;
