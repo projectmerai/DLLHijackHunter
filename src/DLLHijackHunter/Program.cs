@@ -645,6 +645,7 @@ public class Program
         // End-of-scan counters (also logged at Info, so they are in every --log-file).
         string stats = $"Summary: companion executables examined {ScanStats.CompanionsExamined}, kept {ScanStats.CompanionsKept}, " +
             $"rejected {ScanStats.CompanionsRejected}; stopped guarded services not started {ScanStats.GuardSkipped}; " +
+            $"stopped services not started (tool cannot stop them again) {ScanStats.CannotStopSkipped}; " +
             $"unresolved ETW duplicates merged {ScanStats.DuplicatesMerged}";
         AnsiConsole.MarkupLine($"[dim]{Markup.Escape(stats)}[/]");
         ScanLogger.Audit(stats);

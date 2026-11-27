@@ -3,12 +3,14 @@ namespace DLLHijackHunter;
 /// <summary>Per-scan counters printed in the end-of-scan summary (and logged at Info).</summary>
 public static class ScanStats
 {
-    private static int _companionsExamined, _companionsKept, _companionsRejected, _guardSkipped, _duplicatesMerged;
+    private static int _companionsExamined, _companionsKept, _companionsRejected, _guardSkipped, _duplicatesMerged, _cannotStopSkipped;
     public static int CompanionsExamined => _companionsExamined;
     public static int CompanionsKept => _companionsKept;
     public static int CompanionsRejected => _companionsRejected;
     public static int GuardSkipped => _guardSkipped;
     public static int DuplicatesMerged => _duplicatesMerged;
+    /// <summary>F6: stopped services not started because the tool could not stop them again.</summary>
+    public static int CannotStopSkipped => _cannotStopSkipped;
 
     internal static void AddCompanions(int examined, int kept, int rejected)
     {
@@ -18,9 +20,10 @@ public static class ScanStats
     }
     internal static void AddGuardSkipped(int n) => Interlocked.Add(ref _guardSkipped, n);
     internal static void AddDuplicatesMerged(int n) => Interlocked.Add(ref _duplicatesMerged, n);
+    internal static void AddCannotStopSkipped(int n) => Interlocked.Add(ref _cannotStopSkipped, n);
 
     internal static void Reset()
     {
-        _companionsExamined = _companionsKept = _companionsRejected = _guardSkipped = _duplicatesMerged = 0;
+        _companionsExamined = _companionsKept = _companionsRejected = _guardSkipped = _duplicatesMerged = _cannotStopSkipped = 0;
     }
 }

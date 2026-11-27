@@ -138,8 +138,9 @@ public static class TriggerExecutor
 
     // sc.exe could not be started at all (e.g. blocked by antivirus). A timeout is not a launch
     // failure: as in 9c91eab, the confirm-file poll decides the outcome.
+    // F6: a start refused because the tool could not stop the service again is also a failure to trigger.
     private static bool IsLaunchFailure((ServiceActionOutcome outcome, string output) r) =>
-        r.outcome == ServiceActionOutcome.Failed && r.output != "sc.exe timed out";
+        r.outcome == ServiceActionOutcome.RefusedCannotStop || (r.outcome == ServiceActionOutcome.Failed && r.output != "sc.exe timed out");
 
     private static async Task<bool> TriggerScheduledTask(HijackCandidate candidate, string actorId, int timeoutSeconds)
     {

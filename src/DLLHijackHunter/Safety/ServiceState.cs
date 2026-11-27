@@ -15,6 +15,13 @@ public interface IScm
     /// <summary>Send "stop" or "start" (sc.exe). Returns when sc.exe returns or times out.</summary>
     Task<(ServiceActionOutcome outcome, string output)> SendAsync(string verb, string name, int timeoutMs);
     Task Delay(TimeSpan t);
+    /// <summary>
+    /// F6: null when the tool can open the SCM and the service with SERVICE_START | SERVICE_STOP (it could stop the
+    /// service again after starting it); otherwise the error. Default: allowed (fakes without the check).
+    /// </summary>
+    string? CheckStartStopAccess(string name) => null;
+    /// <summary>F6: dwControlsAccepted of the service as it is now, or null when unknown.</summary>
+    int? ControlsAccepted(string name) => null;
 }
 
 /// <summary>Real SCM: status straight from the SCM (QueryServiceStatusEx), commands through sc.exe.</summary>
@@ -73,6 +80,49 @@ public sealed class RealScm : IScm
         ServiceControl.RunScAsync($"{verb} \"{name}\"", timeoutMs);
 
     public Task Delay(TimeSpan t) => Task.Delay(t);
+
+    private const uint SERVICE_START = 0x0010, SERVICE_STOP = 0x0020;
+
+    /// <summary>
+    /// F6: open the SCM (SC_MANAGER_CONNECT, what sc.exe uses for start and stop) and the service with
+    /// SERVICE_START | SERVICE_STOP. gpsvc on Windows 11 (TIER 5 VM run): the ETW phase started it, and every later
+    /// "sc stop" failed with OpenService error 5, so it could not be put back in its snapshot state.
+    /// </summary>
+    public string? CheckStartStopAccess(string name)
+    {
+        IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+        if (scm == IntPtr.Zero) return $"OpenSCManager failed {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}";
+        try
+        {
+            IntPtr svc = OpenServiceW(scm, name, SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS);
+            if (svc == IntPtr.Zero)
+            {
+                int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                return $"OpenService(SERVICE_START | SERVICE_STOP) failed {err}" + (err == 5 ? ": access denied" : "");
+            }
+            CloseServiceHandle(svc);
+            return null;
+        }
+        finally { CloseServiceHandle(scm); }
+    }
+
+    public int? ControlsAccepted(string name)
+    {
+        IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+        if (scm == IntPtr.Zero) return null;
+        try
+        {
+            IntPtr svc = OpenServiceW(scm, name, SERVICE_QUERY_STATUS);
+            if (svc == IntPtr.Zero) return null;
+            try
+            {
+                var buf = new byte[36];   // SERVICE_STATUS_PROCESS: dwControlsAccepted at offset 8
+                return QueryServiceStatusEx(svc, 0, buf, buf.Length, out _) ? BitConverter.ToInt32(buf, 8) : null;
+            }
+            finally { CloseServiceHandle(svc); }
+        }
+        finally { CloseServiceHandle(scm); }
+    }
 }
 
 /// <summary>
@@ -92,6 +142,10 @@ public sealed class ServiceStateTracker
     internal void MarkStart(string name) { lock (_lock) _started.Add(name); }
     internal bool WasStopSent(string name) { lock (_lock) return _stopped.Contains(name); }
     internal bool WasStartSent(string name) { lock (_lock) return _started.Contains(name); }
+    // F6: started by the tool but does not accept a stop: reported once as service-not-restorable, never restored.
+    private readonly HashSet<string> _notRestorable = new(StringComparer.OrdinalIgnoreCase);
+    internal void MarkNotRestorable(string name) { lock (_lock) _notRestorable.Add(name); }
+    internal bool IsNotRestorable(string name) { lock (_lock) return _notRestorable.Contains(name); }
     public IReadOnlyList<string> Touched { get { lock (_lock) return _stopped.Union(_started, StringComparer.OrdinalIgnoreCase).ToList(); } }
     public IReadOnlyDictionary<string, SvcStatus> All { get { lock (_lock) return new Dictionary<string, SvcStatus>(_snapshot, StringComparer.OrdinalIgnoreCase); } }
 }

@@ -7,7 +7,8 @@ public enum ServiceActionOutcome
 {
     Sent,            // sc.exe ran (its own exit code is in Output; callers poll state themselves)
     RefusedByGuard,  // the guard refused; no process was started
-    Failed           // sc.exe could not be started or timed out (e.g. blocked by antivirus)
+    Failed,          // sc.exe could not be started or timed out (e.g. blocked by antivirus)
+    RefusedCannotStop // F6: a stopped service the tool could not stop again; not started
 }
 
 /// <summary>
@@ -85,6 +86,8 @@ public static class ServiceControl
     {
         var snap = Tracker.Snapshot(serviceName);
         if (snap == null || snap.State is not (SvcState.Running or SvcState.Stopped)) return null;
+        // F6: already reported as service-not-restorable when it was started; it cannot be stopped, so no attempt.
+        if (Tracker.IsNotRestorable(serviceName)) return null;
 
         var cur = await WaitForStableAsync(serviceName, StateWaitMs);
         if (cur.State == snap.State) return null;
@@ -197,6 +200,8 @@ public static class ServiceControl
         return r;
     }
 
+    private const int SERVICE_ACCEPT_STOP = 0x1;
+
     /// <summary>F4: when the last start of each service was requested (UTC), just before the command was sent.</summary>
     internal static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> StartRequestedUtc =
         new(StringComparer.OrdinalIgnoreCase);
@@ -207,7 +212,16 @@ public static class ServiceControl
     {
         string? args = BuildStartArguments(serviceName);
         if (args == null) return (ServiceActionOutcome.Failed, "invalid service name");
-        await EnsureSnapshotAsync(serviceName);
+        var snap = await EnsureSnapshotAsync(serviceName);
+        // F6: never start a service the snapshot recorded as Stopped unless the tool could stop it again.
+        bool snapStopped = snap.State == SvcState.Stopped;
+        if (snapStopped && Scm.CheckStartStopAccess(serviceName) is string denied)
+        {
+            ScanLogger.Info($"not starting stopped service {serviceName}: tool cannot stop it again ({denied})");
+            Audit.Record(actorId, candidate, "service-start", serviceName, $"refused-cannot-stop: {denied}");
+            ScanStats.AddCannotStopSkipped(1);
+            return (ServiceActionOutcome.RefusedCannotStop, denied);
+        }
         await WaitForStableAsync(serviceName, StateWaitMs);
         Tracker.MarkStart(serviceName);
         StartRequestedUtc[serviceName] = DateTime.UtcNow;   // F4: the canary's fire time is also given relative to this
@@ -216,6 +230,21 @@ public static class ServiceControl
         // up), so waiting for a stable state covers both a normal and a slow start.
         var s = await WaitForStableAsync(serviceName, StateWaitMs);
         Audit.Record(actorId, candidate, "service-start", serviceName, WithState(r, s));
+        // F6 fallback (not the expected path): started from Stopped, but the running service does not accept a stop.
+        if (snapStopped && s.State == SvcState.Running && Scm.ControlsAccepted(serviceName) is int ca && (ca & SERVICE_ACCEPT_STOP) == 0)
+        {
+            Tracker.MarkNotRestorable(serviceName);
+            string why = $"dwControlsAccepted=0x{ca:X} lacks SERVICE_ACCEPT_STOP";
+            Audit.Record(actorId, candidate, "service-not-restorable", serviceName, why);
+            ScanLogger.Error($"service {serviceName} was started by the tool and does not accept a stop ({why}); it cannot be returned to Stopped");
+            DLLHijackHunter.Canary.ScanSession.AddResidue(new ResidueEntry
+            {
+                Kind = "service-not-restorable", Service = serviceName, Path = "service:" + serviceName,
+                ExpectedState = SvcState.Stopped.ToString(), ActualState = s.State.ToString(), LastError = why,
+                CandidateId = candidate?.Id,
+                Reason = $"service {serviceName} was started by the tool and does not accept a stop; it cannot be returned to Stopped"
+            });
+        }
         return r;
     }
 
