@@ -35,8 +35,6 @@ run_admin.ps1
 run_matrix.bat
 run_matrix.ps1
 
-# Claude session settings
-.claude/
 
 # AI analysis artifacts
 docs/analysis/
