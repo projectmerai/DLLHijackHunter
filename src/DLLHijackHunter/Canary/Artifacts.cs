@@ -230,6 +230,109 @@ public interface IFileOps
     bool ScheduleDeleteOnReboot(string path);
     bool ScheduleMoveOnReboot(string source, string dest);
     string? FindLockHolders(string path);
+    /// <summary>F2: the path with the file name exactly as its directory entry spells it (case included).</summary>
+    string ExactPath(string path) => OnDiskName.ExactPath(path);
+    /// <summary>F2: size and last-write time (UTC), or null when the file is absent.</summary>
+    (long Size, DateTime LastWriteUtc)? Stat(string path) => OnDiskName.Stat(path);
+}
+
+/// <summary>F2: names and attributes straight from the file system, not from a candidate's (lower-case) DllName.</summary>
+public static class OnDiskName
+{
+    /// <summary>
+    /// <paramref name="path"/> with its file name replaced by the directory entry's own spelling. Unchanged when the
+    /// file is absent or the directory cannot be listed.
+    /// </summary>
+    public static string ExactPath(string path)
+    {
+        try
+        {
+            string? dir = Path.GetDirectoryName(path);
+            string name = Path.GetFileName(path);
+            if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name) || name.IndexOfAny(new[] { '*', '?' }) >= 0) return path;
+            // The pattern can also match an 8.3 short name: keep only an entry whose long name is this name.
+            foreach (var e in Directory.EnumerateFileSystemEntries(dir, name))
+            {
+                string onDisk = Path.GetFileName(e);
+                if (string.Equals(onDisk, name, StringComparison.OrdinalIgnoreCase)) return Path.Combine(dir, onDisk);
+            }
+        }
+        catch { }
+        return path;
+    }
+
+    public static (long Size, DateTime LastWriteUtc)? Stat(string path)
+    {
+        try
+        {
+            var fi = new FileInfo(path);
+            return fi.Exists ? (fi.Length, fi.LastWriteTimeUtc) : null;
+        }
+        catch { return null; }
+    }
+}
+
+/// <summary>F2: an existing file at a canary or probe position, recorded when it is backed up.</summary>
+public sealed record OriginalFileRecord(string ExactPath, string? Sha256, long Size, DateTime LastWriteUtc);
+
+/// <summary>
+/// F2: back up / restore an existing file under its exact on-disk name, and verify the restore. The restore used to
+/// move the backup to the candidate's path, which is built from the lower-case DllName, so the SDK run's Microsoft
+/// IpOverUsbDiscovery.dll came back as ipoverusbdiscovery.dll (content, size and mtime were preserved).
+/// </summary>
+public static class OriginalFile
+{
+    /// <summary>The existing file at <paramref name="path"/>: exact name, SHA-256, size, mtime. Null when absent.</summary>
+    public static OriginalFileRecord? Capture(IFileOps fs, string path)
+    {
+        if (!fs.Exists(path)) return null;
+        string exact = fs.ExactPath(path);
+        var st = fs.Stat(exact);
+        return new OriginalFileRecord(exact, fs.Sha256(exact), st?.Size ?? -1, st?.LastWriteUtc ?? DateTime.MinValue);
+    }
+
+    /// <summary>Null when the file at the record's exact path matches it (name case, SHA-256, size, mtime); else why not.</summary>
+    public static string? Mismatch(IFileOps fs, OriginalFileRecord rec)
+    {
+        if (!fs.Exists(rec.ExactPath)) return $"{rec.ExactPath} is absent";
+        var why = new List<string>();
+        string onDisk = Path.GetFileName(fs.ExactPath(rec.ExactPath));
+        if (!string.Equals(onDisk, Path.GetFileName(rec.ExactPath), StringComparison.Ordinal))
+            why.Add($"name is '{onDisk}', expected '{Path.GetFileName(rec.ExactPath)}'");
+        string? h = fs.Sha256(rec.ExactPath);
+        if (!string.Equals(h, rec.Sha256, StringComparison.OrdinalIgnoreCase)) why.Add($"SHA-256 {h ?? "unreadable"} != {rec.Sha256}");
+        var st = fs.Stat(rec.ExactPath);
+        if (st == null || st.Value.Size != rec.Size) why.Add($"size {st?.Size.ToString() ?? "?"} != {rec.Size}");
+        if (st == null || st.Value.LastWriteUtc != rec.LastWriteUtc)
+            why.Add($"mtime {st?.LastWriteUtc.ToString("o") ?? "?"} != {rec.LastWriteUtc:o}");
+        return why.Count == 0 ? null : string.Join("; ", why);
+    }
+
+    /// <summary>
+    /// Move the backup back to the record's exact path (with ArtifactCleaner's retries), then verify it. A failed
+    /// restore or a mismatch is returned as residue (exit code 4); every step is audited.
+    /// </summary>
+    public static async Task<ResidueEntry?> RestoreAndVerifyAsync(string backupPath, OriginalFileRecord rec,
+        string? candidateId, IFileOps fs, Func<Task>? stopTrigger, CleanupOptions? options = null,
+        Action<string, string, string>? audit = null)
+    {
+        audit ??= (_, _, _) => { };
+        var r = await ArtifactCleaner.RestoreAsync(backupPath, rec.ExactPath, rec.Sha256, candidateId, fs, stopTrigger, options, audit);
+        if (r != null) return r;
+        string? bad = Mismatch(fs, rec);
+        if (bad == null)
+        {
+            audit("file-restore-verified", rec.ExactPath, "name, SHA-256, size and mtime match the backup record");
+            return null;
+        }
+        audit("file-restore-verified", rec.ExactPath, "MISMATCH: " + bad);
+        return new ResidueEntry
+        {
+            Path = rec.ExactPath, Role = ArtifactRole.Backup, Sha256 = fs.Sha256(rec.ExactPath), CandidateId = candidateId,
+            Holder = fs.FindLockHolders(rec.ExactPath),
+            Reason = $"original restored to {rec.ExactPath} but it does not match the backup record: {bad}"
+        };
+    }
 }
 
 public class RealFileOps : IFileOps
@@ -254,6 +357,8 @@ public class RealFileOps : IFileOps
         MoveFileEx(source, dest, MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING);
 
     public virtual string? FindLockHolders(string path) => RestartManager.DescribeHolders(path);
+    public virtual string ExactPath(string path) => OnDiskName.ExactPath(path);
+    public virtual (long Size, DateTime LastWriteUtc)? Stat(string path) => OnDiskName.Stat(path);
 }
 
 public static class ArtifactHash

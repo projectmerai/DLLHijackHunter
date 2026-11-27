@@ -7,6 +7,9 @@ namespace DLLHijackHunter.Canary;
 
 public class CanaryEngine
 {
+    /// <summary>F2: the canary was planted over an existing file. The type is unchanged (a replace type is OPEN).</summary>
+    public const string ReplacedExistingNote = "Canary replaced an existing file (writable existing DLL); original restored";
+
     private readonly ScanProfile _profile;
 
     public CanaryEngine(ScanProfile profile)
@@ -247,7 +250,9 @@ public class CanaryEngine
             string? backupPath = null;
             string? sidecarPath = null;   // proxy forward target, staged before deploy
             string? sidecarHash = null;
-            string? originalHash = hadExistingDll ? fs.Sha256(deploy) : null;
+            // F2: the existing file's exact on-disk name (not the candidate's lower-case DllName), hash, size and mtime.
+            OriginalFileRecord? original = hadExistingDll ? OriginalFile.Capture(fs, deploy) : null;
+            string? originalHash = original?.Sha256;
             bool deployAttempted = false;
 
             // R3: the service's state comes from the scan's snapshot, never a per-candidate query
@@ -279,7 +284,7 @@ public class CanaryEngine
                     if (!ScanSession.TryRecord(new ArtifactEntry
                         {
                             Path = backupPath, Role = ArtifactRole.Backup, Sha256 = originalHash,
-                            CandidateId = candidate.Id, RestoreTo = deploy
+                            CandidateId = candidate.Id, RestoreTo = original?.ExactPath ?? deploy
                         }, out string? recErr))
                     {
                         backupPath = null;
@@ -526,31 +531,35 @@ public class CanaryEngine
                 // Restore backup
                 if (backupPath != null && fs.Exists(backupPath))
                 {
+                    // F2: restore under the exact original name, then verify name case, hash, size and mtime.
+                    var rec = original ?? new OriginalFileRecord(deploy, originalHash, -1, DateTime.MinValue);
                     ResidueEntry? r;
                     if (canaryGone)
-                        r = await ArtifactCleaner.RestoreAsync(backupPath, deploy, originalHash, candidate.Id, fs,
-                            stopAgain, null, Act);
+                        r = await OriginalFile.RestoreAndVerifyAsync(backupPath, rec, candidate.Id, fs, stopAgain, null, Act);
                     else
                     {
                         // The canary is still there (delete scheduled for reboot): schedule the
                         // original to be moved back after it, at the same reboot.
                         bool s = false;
-                        try { s = fs.ScheduleMoveOnReboot(backupPath, deploy); } catch { }
-                        Act("file-restore-delayed", deploy, s ? "scheduled for next reboot" : "could not schedule");
+                        try { s = fs.ScheduleMoveOnReboot(backupPath, rec.ExactPath); } catch { }
+                        Act("file-restore-delayed", rec.ExactPath, s ? "scheduled for next reboot" : "could not schedule");
                         r = new ResidueEntry
                         {
                             Path = backupPath, Role = ArtifactRole.Backup, Sha256 = originalHash, CandidateId = candidate.Id,
                             DelayedDeleteScheduled = s, Holder = fs.FindLockHolders(deploy),
-                            Reason = $"original could not be restored to {deploy}: the canary there is still locked"
+                            Reason = $"original could not be restored to {rec.ExactPath}: the canary there is still locked"
                         };
                     }
 
-                    if (r == null && string.Equals(fs.Sha256(deploy), originalHash, StringComparison.OrdinalIgnoreCase))
+                    if (r == null)
+                    {
                         ScanSession.Forget(backupPath);
-                    else if (r != null)
+                        candidate.Notes.Add(ReplacedExistingNote);
+                    }
+                    else
                     {
                         ScanSession.AddResidue(r);
-                        candidate.Notes.Add("Warning: Could not restore original DLL from backup - file may be locked by a lingering process. " +
+                        candidate.Notes.Add($"Warning: the original DLL was not restored cleanly ({r.Reason}). " +
                             DescribeResidue(r));
                     }
                 }

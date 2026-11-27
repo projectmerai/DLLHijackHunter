@@ -222,6 +222,7 @@ public static class LoadProbe
         var fs = ScanSession.Files;
         string? probeHash = ArtifactHash.OfFile(probeDll);
         string? originalHash = null;
+        OriginalFileRecord? original = null;   // F2: exact on-disk name, hash, size, mtime of an existing file
         void Act(string action, string tgt, string result) => Audit.Record(probeId, c, action, tgt, result);
 
         // Never probe over a DLLHijackHunter artifact as if it were the original.
@@ -244,9 +245,10 @@ public static class LoadProbe
             if (kind == DeployPathKind.Original)
             {
                 backup = target + ".probebak";
-                originalHash = fs.Sha256(target);
+                original = OriginalFile.Capture(fs, target);
+                originalHash = original?.Sha256;
                 if (!ScanSession.TryRecord(new ArtifactEntry
-                    { Path = backup, Role = ArtifactRole.Backup, Sha256 = originalHash, CandidateId = c.Id, RestoreTo = target }, out var e1))
+                    { Path = backup, Role = ArtifactRole.Backup, Sha256 = originalHash, CandidateId = c.Id, RestoreTo = original?.ExactPath ?? target }, out var e1))
                     ScanLogger.Warn($"Load probe backup {backup} not recorded in the artifact manifest: {e1}");
                 fs.Copy(target, backup, true);
                 Act("file-backed-up", target, "-> " + backup);
@@ -340,19 +342,21 @@ public static class LoadProbe
 
             if (backup != null && fs.Exists(backup))
             {
+                // F2: back under the exact original name, verified (name case, hash, size, mtime).
+                var rec = original ?? new OriginalFileRecord(target, originalHash, -1, DateTime.MinValue);
                 ResidueEntry? r = probeGone
-                    ? ArtifactCleaner.RestoreAsync(backup, target, originalHash, c.Id, fs, null, null, Act).GetAwaiter().GetResult()
+                    ? OriginalFile.RestoreAndVerifyAsync(backup, rec, c.Id, fs, null, null, Act).GetAwaiter().GetResult()
                     : new ResidueEntry
                     {
                         Path = backup, Role = ArtifactRole.Backup, Sha256 = originalHash, CandidateId = c.Id,
-                        DelayedDeleteScheduled = fs.ScheduleMoveOnReboot(backup, target),
-                        Reason = $"original could not be restored to {target}: the probe there is still locked"
+                        DelayedDeleteScheduled = fs.ScheduleMoveOnReboot(backup, rec.ExactPath),
+                        Reason = $"original could not be restored to {rec.ExactPath}: the probe there is still locked"
                     };
                 if (r == null) ScanSession.Forget(backup);
                 else
                 {
                     ScanSession.AddResidue(r);
-                    c.Notes.Add("Warning: original DLL could not be restored after load probe; recorded as residue.");
+                    c.Notes.Add($"Warning: original DLL not restored cleanly after load probe ({r.Reason}); recorded as residue.");
                 }
             }
             else if (backup != null) ScanSession.Forget(backup);
