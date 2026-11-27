@@ -177,7 +177,9 @@ For Phantom, Search-order, and Side-load candidates, a benign probe DLL is copie
 | **Error** | The probe could not run — including the probe being **quarantined by antivirus** | Inconclusive, no penalty |
 | **Skipped** | `.local`, PATH, AppInit/AppCert use different mechanics | — |
 
-The probe models where the position really sits: a DLL in the binary's **own directory** is tested ahead of System32 (as the loader does); other positions use the classic or modern search order as appropriate. Runs as a standard user; every probe is removed and any original file restored.
+The probe models where the position really sits: a DLL in the binary's **own directory** is tested ahead of System32 (as the loader does); other positions use the classic or modern search order as appropriate. Runs as a standard user; every probe is removed and any original file restored under its exact on-disk name.
+
+The probe resolves the name in the scanner's own child process, not in the target. When it says **Wins** but the canary in the real target timed out, the finding gets the note *"Load probe and canary disagree: probe Wins, canary Timeout"* and the probe does not raise its tier. A .NET image's `mscoree.dll` gets no static search-order finding at all: the OS loader loads it from the system directory without searching the application directory (observed on Windows 11 build 26300).
 
 ### Canary confirmation
 
@@ -201,7 +203,9 @@ sequenceDiagram
 - **No compiler needed.** Precompiled x64/x86 canaries are embedded; when the hijacked DLL has exports, an export-forwarding proxy is synthesised at runtime by PE surgery so the host keeps working.
 - **Self-locating.** The canary derives its confirmation path (`%ProgramData%\DLLHijackHunter\canary_<hash>.confirm`) from its own load path, so one binary serves every candidate.
 - **No payload.** It only records who loaded it. Source: `src/DLLHijackHunter/Resources/canary_src.c` (rebuild with `Resources/build_canary.bat`, MSVC required only for that).
-- **Service children.** A service may start the process that loads the DLL well after it starts itself (Checkmk launches `cmk-agent-ctl.exe` ~31 s after every start). For Service triggers the canary therefore waits until the service is stably RUNNING, then up to `--canary-service-wait` seconds (default 90). Each fire is timed in `CanaryActions` (`canary-fired`: seconds from the service reaching RUNNING and from the plant).
+- **Service children.** A service may start the process that loads the DLL well after it starts itself (Checkmk launches `cmk-agent-ctl.exe` ~31 s after every start). For Service triggers the canary therefore waits until the service is stably RUNNING, then up to `--canary-service-wait` seconds (default 90). Each fire is timed relative to the plant and the start request, e.g. *"confirm file written 2.2 s after plant, 0.2 s after start request (before RUNNING)"* for a DLL loaded during process start-up; the exact times are in `CanaryActions` (`canary-fired`).
+- **Existing files.** When the position already holds a file, it is backed up with its exact on-disk name, hash, size and mtime, and restored under that name; a restore that does not match the record is residue (exit code `4`). The finding gets the note *"Canary replaced an existing file (writable existing DLL); original restored"*.
+- **Cleanup after a service stop** waits (up to 10 s) for the service's process to exit before the canary is deleted, because the SCM reports STOPPED before the process has unmapped the DLL (`process-exit-wait` in `CanaryActions`).
 - **Results:** `Fired`, `Timeout` (triggered, never loaded), `Failed` (could not trigger/deploy; or `CanaryFailureCause = "host-failed-after-plant"` when an Application Error, WER or loader-popup event after the plant names the planted module — no penalty, not Confirmed), `Blocked` (canary quarantined by antivirus — inconclusive), `NotTested` (Run keys, Startup, UAC bypass, and manual targets need a logon/reboot).
 - **COM caveat:** in-process COM objects are activated from a scanner-launched client, so a fired canary proves the load but its identity is the scanner's — it is recorded as *caller context* and does not inflate impact.
 
@@ -236,7 +240,8 @@ Each finding gets a **confidence** (from the filters, probe, canary, and knowled
 -o, --output <path>           Write a report; format from extension (.json / .html / .htm)
 -f, --format <format>         console | json | html                              [default: console]
 -t, --target <target>         Binary path, directory, or file name (partial match). Scopes discovery
-                              and ETW to that target and skips system-wide PATH weaponisation.
+                              and ETW to that target and skips system-wide PATH weaponisation, and
+                              the AutoElevate hunt when the target is outside the Windows directory.
     --min-confidence <0-100>  Override the profile's threshold (only when explicitly passed)
     --no-canary               Disable canary confirmation
     --no-etw                  Disable ETW runtime discovery (no service/task starts)
@@ -268,6 +273,8 @@ Each finding gets a **confidence** (from the filters, probe, canary, and knowled
 
 - **Console** (default): summary, tier chart, findings, attack chains. Nothing is written to disk unless you pass `--output` (a non-`.json`/`.html` path receives the JSON report when there are findings).
 - **JSON / HTML**: full findings with notes, filter results, load-probe and canary results, knowledge-base references, and attack chains. A report is written even when nothing is found, so an empty file never means a failed run.
+- **Confirmed headlines**: whatever `--format` is, the console ends with one line per Confirmed finding: `CONFIRMED  <DLL>  <hole>  <type>  as <identity>  (<trigger>)`.
+- **Redirected output**: when the output is redirected or the console code page is not UTF-8, symbols are printed as ASCII (`->` for `→`, `=` for `═`, and so on). With `--verbose`, per-event diagnostics (e.g. each ignored file open by the System process) go to the `--log-file` only, with one count line on the console.
 
 ### Exit codes
 
@@ -306,14 +313,19 @@ Requirements: .NET 8 SDK (and the .NET 10 SDK if you also build the `net10.0-win
 git clone https://github.com/projectmerai/DLLHijackHunter.git
 cd DLLHijackHunter
 
-# Self-contained single-file executable (no .NET runtime needed on the target)
+# Release asset: Release, net8.0-windows, win-x64, self-contained single file (no .NET runtime
+# needed on the target). Published as DLLHijackHunter-v<version>-win-x64.exe.
+.\build.ps1 -Release -SingleFile
+Copy-Item .\build\DLLHijackHunter.exe .\DLLHijackHunter-v2.7.0-win-x64.exe
+
+# The same publish without the script
 dotnet publish src/DLLHijackHunter/DLLHijackHunter.csproj `
     -c Release -f net8.0-windows -r win-x64 --self-contained `
     -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-    -o ./publish
+    -p:TargetFrameworks=net8.0-windows -o ./publish
 ```
 
-The project multi-targets `net8.0-windows` and `net10.0-windows`, so `dotnet publish` needs an explicit `-f`.
+The project multi-targets `net8.0-windows` and `net10.0-windows`, so `dotnet publish` needs an explicit `-f`; with only the .NET 8 SDK installed it also needs `-p:TargetFrameworks=net8.0-windows` (otherwise restore fails with NETSDK1045 for `net10.0-windows`). `.\build.ps1` with no switches is a Debug, framework-dependent build for development.
 
 ---
 
@@ -332,7 +344,8 @@ Build with `HijackRange\build-all.bat`, deploy with `HijackRange\setup.ps1` (ele
 ## Known limitations
 
 - **Static search order is an approximation.** Runtime behaviour (`LoadLibraryEx` flags, `SetDefaultDllDirectories`, manifests) is inferred from imports; use `--verify-load` or the canary for proof.
-- **ETW** sees only processes and loads that happen during the trace window (default 120 s).
+- **ETW** sees only processes and loads that happen during the trace window (default 120 s). An auto-start service that is **already running** when the scan starts loaded its start-up DLLs before the trace existed: a plain untargeted scan does not restart it, so DLLs it loads only at run time (not imports) are not seen. Use `--target <its directory>` (restarts up to 5 matching running services) or the disruptive `--restart-services`. On the Windows SDK IP over USB service (CVE-2025-47962) both find the CVE's `CRYPTSP.dll`; a plain scan does not.
+- **The managed-image `mscoree.dll` rule** (no static finding for a .NET image's `mscoree.dll`) is based on Windows 11 build 26300; it has not yet been verified on Windows 10.
 - **Persistence** ("survives reboot") is derived from auto-start configuration, not a reboot test.
 - **Run keys / Startup / UAC side-load** findings cannot be canary-confirmed automatically.
 - **Canary and probe DLLs are unsigned** and may be blocked by antivirus or application-control policy.
