@@ -30,6 +30,7 @@
 - [Safety and operational impact](#safety-and-operational-impact)
 - [Building from source](#building-from-source)
 - [Test lab (HijackRange)](#test-lab-hijackrange)
+- [Verified against real targets](#verified-against-real-targets)
 - [Known limitations](#known-limitations)
 - [Comparison](#comparison)
 
@@ -51,7 +52,7 @@ Every judgement is made **from the attacker's point of view** — an unprivilege
 
 ## Quick start
 
-Download or build `DLLHijackHunter.exe` (self-contained; no .NET install needed), then from an **elevated** prompt:
+Download `DLLHijackHunter-v<version>-win-x64.exe` from the [latest release](https://github.com/projectmerai/DLLHijackHunter/releases/latest) (self-contained; no .NET install needed; each release lists its SHA-256), or [build it](#building-from-source). Then, from an **elevated** prompt:
 
 ```powershell
 # Passive, read-only triage: no file drops, no service/task starts
@@ -177,9 +178,9 @@ For Phantom, Search-order, and Side-load candidates, a benign probe DLL is copie
 | **Error** | The probe could not run — including the probe being **quarantined by antivirus** | Inconclusive, no penalty |
 | **Skipped** | `.local`, PATH, AppInit/AppCert use different mechanics | — |
 
-The probe models where the position really sits: a DLL in the binary's **own directory** is tested ahead of System32 (as the loader does); other positions use the classic or modern search order as appropriate. Runs as a standard user; every probe is removed and any original file restored under its exact on-disk name.
+The probe models where the position really sits: a DLL in the binary's **own directory** is tested ahead of System32 (as the loader does); other positions use the classic or modern search order as appropriate. Every probe is removed and any original file restored under its exact on-disk name.
 
-The probe resolves the name in the scanner's own child process, not in the target. When it says **Wins** but the canary in the real target timed out, the finding gets the note *"Load probe and canary disagree: probe Wins, canary Timeout"* and the probe does not raise its tier. A .NET image's `mscoree.dll` gets no static search-order finding at all: the OS loader loads it from the system directory without searching the application directory (observed on Windows 11 build 26300).
+The probe resolves the name in a child process of the scanner, with the scanner's own token (usually elevated) and architecture, not in the target and not as a standard user. When it says **Wins** but the canary in the real target timed out, the finding gets the note *"Load probe and canary disagree: probe Wins, canary Timeout"* and the probe does not raise its tier. A .NET image's `mscoree.dll` gets no static search-order finding at all: the OS loader loads it from the system directory without searching the application directory (observed on Windows 11 build 26300).
 
 ### Canary confirmation
 
@@ -339,6 +340,19 @@ The project multi-targets `net8.0-windows` and `net10.0-windows`, so `dotnet pub
 - **Gamma** — a writable directory added to the system PATH.
 
 Build with `HijackRange\build-all.bat`, deploy with `HijackRange\setup.ps1` (elevated), and remove with `HijackRange\teardown.ps1`. See `HijackRange/demo-script.md`. Use a disposable VM.
+
+---
+
+## Verified against real targets
+
+v2.7.0 was run against two public CVEs, each on its vulnerable build and on the vendor's fixed build. Environment: Windows 11 Enterprise build 26300 in a VM, Microsoft Defender real-time and tamper protection on, network off. No run had a Defender detection or left residue.
+
+| Target | CVE | Vulnerable build: what v2.7.0 reports | Fixed build |
+|---|---|---|---|
+| Checkmk Windows agent | CVE-2024-28827 | **2.2.0p23.** The LocalSystem service `CheckmkService` starts `cmk-agent-ctl.exe` from `C:\ProgramData\checkmk\agent\bin`, which standard users can write to. A plain `--profile aggressive` scan finds it through companion discovery and confirms `secur32.dll` and `bcrypt.dll` as SYSTEM (SearchOrder); `--restart-services` also confirms `SSPICLI.dll` and `CRYPTBASE.dll`. | **2.2.0p29:** 0 findings |
+| Windows SDK "IP over USB" service | CVE-2025-47962 | **10.1.26100.3323.** The LocalSystem service `IpOverUsbSvc` is installed under `C:\Microsoft Shared\Phone Tools\CoreCon\11.0\bin`, which inherits Authenticated Users Modify from `C:\`. With `--target <that directory>` or `--restart-services`, the CVE's `CRYPTSP.dll` is confirmed as SYSTEM (SearchOrder), together with `CRYPTBASE.dll`, `bcrypt.dll`, `MSWSOCK.dll` and `WINUSB.DLL`. A plain scan misses `CRYPTSP.dll` because the service is already running (see [Known limitations](#known-limitations)). | **10.1.26100.4188** (installs under Common Files): 0 findings |
+
+On the Windows SDK build the canary result was also cross-checked without the tool: a standard user copied the unmodified Microsoft `cryptsp.dll` to the reported position, and after a restart the SYSTEM service loaded that copy instead of the one in `SysWOW64`.
 
 ---
 
